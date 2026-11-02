@@ -1,0 +1,8 @@
+***MESH INPUT FILE
+specimen3D.inp
+***PROCESS INPUT FILE
+specimen3D.stp
+***MATERIAL INPUT FILE
+material.mat
+***FREQUENCY FOR EXPORT OF OUTPUT FILES
+50
