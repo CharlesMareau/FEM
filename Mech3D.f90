@@ -5,18 +5,19 @@ program fem_main
  implicit none
  integer :: freq
 ! Variables maillage
- integer :: nnode,nelem,ndof,nnode_per_element,nntg,nntg_per_element,npair
+ integer :: nnode,nelem2d,nelem3d,nnset,nelset,ndof,nnode_per_element2d,nnode_per_element3d,nntg,nntg_per_element2d,nntg_per_element3d
  real(8), allocatable :: coords(:,:),location(:,:)
- integer, allocatable :: conn(:,:)
+ integer, allocatable :: connect3d(:,:),connect2d(:,:),idelem2d(:),idelem3d(:)
 ! Données matériaux
  character(5) :: cname
- character(len=64), allocatable :: nset_names(:)
- integer, allocatable :: nset_sizes(:),nset_nodes(:,:)
+ character(len=64), allocatable :: nset_names(:),elset_names(:)
+ integer, allocatable :: nset_nodes(:),nset_start(:),nset_end(:)
+ integer, allocatable :: elset_elem(:),elset_start(:),elset_end(:)
 ! Variables pour assemblage
- integer :: i,j,k,l,ij,kl,idof,jdof,kdof,iddl,jddl,ielem,inode,jnode,iter,istp,unit,istat,intg,jntg,igss,jgss,iset,nstat,nprop
+ integer :: i,j,k,l,ij,kl,idof,jdof,kdof,iddl,jddl,kddl,ielem,inode,jnode,knode,iter,istp,unit,istat,intg,jntg,igss,jgss,iset,nstat,nprop
  integer, allocatable :: bc_type(:)
  real(8), allocatable :: bc_val(:)
- real(8), allocatable :: stiffness(:),force(:),increment(:),derivative(:,:,:),volume(:),wght(:)
+ real(8), allocatable :: stiffness(:),force(:),increment(:),interpolation(:,:),gradient(:,:,:),volume(:),wght(:)
  real(8), allocatable :: position_new(:),position_old(:)
  type(Tensor2), allocatable :: defgrad_new(:),defgrad_old(:)
  type(Tensor2), allocatable :: stress_new(:),stress_old(:)
@@ -55,20 +56,20 @@ program fem_main
 
 ! *** read material input file
  call read_material(filemat,cname,nstat,nprop,props)
-
 ! *** read mesh file
- call read_inp(filemsh,coords,conn,nnode,nelem,nset_names,nset_sizes,nset_nodes)
-!  call read_msh("hole.msh", coords, conn, nnode, nelem)
- write(*,'("Number of elements",i6)') nelem
+ call read_inp(filemsh)
+!  call read_msh("hole.msh", coords, connect3d, nnode, nelem3d)
+ write(*,'("Number of 2D elements",i6)') nelem2d
+ write(*,'("Number of 3D elements",i6)') nelem3d
  write(*,'("Number of nodes",i6)') nnode
  ndof=3*nnode
  write(*,'("Number of DOFs",i6)') ndof
- nntg=nntg_per_element*nelem
+ nntg=nntg_per_element3d*nelem3d
  write(*,'("Number of integration points",i6)') nntg
-
- allocate(x(nnode_per_element),y(nnode_per_element),z(nnode_per_element))
- allocate(matrix(3*nnode_per_element,3*nnode_per_element),vector(3*nnode_per_element),auxiliary(9,3*nnode_per_element))
-! *** initializes variables
+ write(*,'("Number of nodes per 2D element",i6)') nnode_per_element2d
+ write(*,'("Number of nodes per 3D element",i6)') nnode_per_element3d
+! *** allocate memory
+ allocate(matrix(3*nnode_per_element3d,3*nnode_per_element3d),vector(3*nnode_per_element3d),auxiliary(9,3*nnode_per_element3d))
  allocate(position_new(ndof),position_old(ndof))
  allocate(defgrad_new(nntg),defgrad_old(nntg))
  allocate(stress_new(nntg),stress_old(nntg))
@@ -76,20 +77,21 @@ program fem_main
  allocate(state_new(nstat,nntg),state_old(nstat,nntg))
  allocate(dissipatedenergy_new(nntg),dissipatedenergy_old(nntg))
  allocate(internalenergy_new(nntg),internalenergy_old(nntg))
- do ielem=1,nelem
-  do inode=1,nnode_per_element
-   idof=3*conn(inode,ielem)-2
-   jdof=3*conn(inode,ielem)-1
-   kdof=3*conn(inode,ielem)
-   position_old(idof)=coords(1,conn(inode,ielem))
-   position_old(jdof)=coords(2,conn(inode,ielem))
-   position_old(kdof)=coords(3,conn(inode,ielem))
+! *** initializes variables
+ do ielem=1,nelem3d
+  do inode=1,nnode_per_element3d
+   idof=3*connect3d(inode,ielem)-2
+   jdof=3*connect3d(inode,ielem)-1
+   kdof=3*connect3d(inode,ielem)
+   position_old(idof)=coords(1,connect3d(inode,ielem))
+   position_old(jdof)=coords(2,connect3d(inode,ielem))
+   position_old(kdof)=coords(3,connect3d(inode,ielem))
    position_new(idof)=position_old(idof)
    position_new(jdof)=position_old(jdof)
    position_new(kdof)=position_old(kdof)
   enddo
-  do intg=1,nntg_per_element
-   igss=(ielem-1)*nntg_per_element+intg
+  do intg=1,nntg_per_element3d
+   igss=(ielem-1)*nntg_per_element3d+intg
    internalenergy_old(igss)=0.d0
    internalenergy_new(igss)=0.d0
    dissipatedenergy_old(igss)=0.d0
@@ -105,27 +107,29 @@ program fem_main
   enddo
  enddo
 ! *** calculates the shape function derivative
- allocate(derivative(9,3*nnode_per_element,nntg),location(3,nntg),wght(nntg),volume(nelem))
- do ielem=1,nelem
-  do inode=1,nnode_per_element
-   x(inode)=coords(1,conn(inode,ielem))
-   y(inode)=coords(2,conn(inode,ielem))
-   z(inode)=coords(3,conn(inode,ielem))
+ allocate(interpolation(nnode_per_element3d,nntg),gradient(3,nnode_per_element3d,nntg),location(3,nntg),wght(nntg),volume(nelem3d))
+ allocate(x(nnode_per_element3d),y(nnode_per_element3d),z(nnode_per_element3d))
+ do ielem=1,nelem3d
+  do inode=1,nnode_per_element3d
+   x(inode)=coords(1,connect3d(inode,ielem))
+   y(inode)=coords(2,connect3d(inode,ielem))
+   z(inode)=coords(3,connect3d(inode,ielem))
   enddo
-  igss=(ielem-1)*nntg_per_element+1
-  jgss=(ielem-1)*nntg_per_element+nntg_per_element
-  select case(nntg_per_element)
+  igss=(ielem-1)*nntg_per_element3d+1
+  jgss=(ielem-1)*nntg_per_element3d+nntg_per_element3d
+  select case(nntg_per_element3d)
    case(1)
-    call tetrahedronT4(x,y,z,derivative(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
+    call tetrahedronT4(x,y,z,interpolation(:,igss:jgss),gradient(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
    case(4)
-    call tetrahedronT10(x,y,z,derivative(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
+    call tetrahedronT10(x,y,z,interpolation(:,igss:jgss),gradient(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
    case(8)
-    call hexahedronH8(x,y,z,derivative(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
+    call hexahedronH8(x,y,z,interpolation(:,igss:jgss),gradient(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
    case default
     write(*,'("Unknown type of element. Program will stop !")')
     stop
   end select
  enddo
+ deallocate(x,y,z)
 ! *** generates the csr structure for storage
  call build_csr_structure
  stiffness=0.0_8
@@ -149,6 +153,7 @@ program fem_main
 ! *** finds nodes with prescribed BC
  allocate(bc_type(ndof),bc_val(ndof))
  call read_step(fileproc)
+ time_old=0.d0
 ! *** saves initial state
  if (freq.ne.0) then
   ifile=0
@@ -158,8 +163,9 @@ program fem_main
   call export_vtu(filevtu)
   call export_rct(0)
   call export_rct(1)
+  call export_nrg(0)
+  call export_nrg(1)
  endif
- time_old=0.d0
  istp=0
  progress=0.d0
  do while (time_old.lt.duration)
@@ -169,11 +175,15 @@ program fem_main
   time_new=time_old+dtime
   progress=progress+dtime/duration
 ! *** applies boundary condition
+  !$omp parallel default(shared)
+  !$omp do private(idof) schedule(static)
   do idof=1,ndof
    if (bc_type(idof).eq.1) then
     position_new(idof)=position_old(idof)+bc_val(idof)*dtime/duration
    endif
   enddo
+  !$omp enddo
+  !$omp end parallel
   residual=toler+1.d0
   damping=1.d0
   iter=0
@@ -185,18 +195,24 @@ program fem_main
     stop
    endif
 ! *** calculates the deformation gradient tensor
-   do ielem=1,nelem
-    do intg=1,nntg_per_element
-     igss=(ielem-1)*nntg_per_element+intg
+   !$omp parallel default(shared)
+   !$omp do private(ielem,intg,igss,inode,idof,i,j) schedule(static)
+   do ielem=1,nelem3d
+    do intg=1,nntg_per_element3d
+     igss=(ielem-1)*nntg_per_element3d+intg
      defgrad_new(igss)=null2
-     do inode=1,nnode_per_element
-      do iddl=-2,0
-       idof=3*conn(inode,ielem)+iddl
-       defgrad_new(igss)%val(:,:)=defgrad_new(igss)%val(:,:)+reshape(derivative(:,3*inode+iddl,igss),(/3,3/))*position_new(idof)
+     do inode=1,nnode_per_element3d
+      do i=1,3
+       idof=3*(connect3d(inode,ielem)-1)+i
+       do j=1,3
+        defgrad_new(igss)%val(i,j)=defgrad_new(igss)%val(i,j)+position_new(idof)*gradient(j,inode,igss)
+       enddo
       enddo
      enddo
     enddo
    enddo
+   !$omp enddo
+   !$omp end parallel
 ! *** integrates constitutive relations
    select case(cname)
     case("ELAST","elast","Elast")
@@ -221,63 +237,79 @@ program fem_main
      write(*,'("ERROR: UNKNOWN MATERIAL TYPE")')
      stop
    end select
+   stiffness=0.d0
+   force=0.d0
 ! *** evaluates stiffness matrix
-  stiffness=0.d0
   !$omp parallel default(shared)
-  !$omp do schedule(static) private(ielem,intg,igss,matrix,inode,iddl,idof,jnode,jddl,jdof,kdof)
-  do ielem=1,nelem
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
-     matrix=matmul(transpose(derivative(:,:,igss)),matmul(reshape(modulus_new(igss)%val(:,:,:,:),(/9,9/)),derivative(:,:,igss)))*wght(igss)
-     do inode=1,nnode_per_element
-      do iddl=-2,0
-       idof=3*conn(inode,ielem)+iddl
-       do jnode=1,nnode_per_element
-        do jddl=-2,0
-         jdof=3*conn(jnode,ielem)+jddl
-         kdof=correspond(idof,jdof)
-         !$omp atomic update
-         stiffness(kdof)=stiffness(kdof)+matrix(3*inode+iddl,3*jnode+jddl)
+  !$omp do schedule(static) private(ielem,intg,igss,matrix,inode,iddl,idof,knode,kddl,kdof,jdof,i,j,k,l)
+  do ielem=1,nelem3d
+   do intg=1,nntg_per_element3d
+    igss=(ielem-1)*nntg_per_element3d+intg
+    do inode=1,nnode_per_element3d
+     do i=1,3
+      idof=3*(connect3d(inode,ielem)-1)+i
+      iddl=3*(inode-1)+i
+      do knode=1,nnode_per_element3d
+       do k=1,3
+        kdof=3*(connect3d(knode,ielem)-1)+k
+        kddl=3*(knode-1)+k
+        matrix(iddl,kddl)=0.d0
+        do j=1,3
+         do l=1,3
+          matrix(iddl,kddl)=matrix(iddl,kddl)+gradient(j,inode,igss)*modulus_new(igss)%val(i,j,k,l)*gradient(l,knode,igss)
+         enddo
         enddo
+        matrix(iddl,kddl)=matrix(iddl,kddl)*wght(igss)
+        jdof=correspond(idof,kdof)
+        !$omp atomic update
+        stiffness(jdof)=stiffness(jdof)+matrix(iddl,kddl)
        enddo
       enddo
      enddo
     enddo
    enddo
-   !$omp end do
-   !$omp end parallel
+  enddo
+  !$omp end do
 ! *** evaluates force vector
-   force=0.d0
-  !$omp parallel default(shared)
-  !$omp do schedule(static) private(ielem,intg,igss,vector,inode,iddl,idof)
-   do ielem=1,nelem
-    do intg=1,nntg_per_element
-     igss=(ielem-1)*nntg_per_element+intg
-     vector=matmul(transpose(derivative(:,:,igss)),reshape(stress_new(igss)%val(:,:),(/9/)))*wght(igss)
-     do inode=1,nnode_per_element
-      do iddl=-2,0
-       idof=3*conn(inode,ielem)+iddl
+  !$omp do schedule(static) private(ielem,intg,igss,vector,inode,iddl,idof,i,j)
+   do ielem=1,nelem3d
+    do intg=1,nntg_per_element3d
+     igss=(ielem-1)*nntg_per_element3d+intg
+     do inode=1,nnode_per_element3d
+      do i=1,3
+       idof=3*(connect3d(inode,ielem)-1)+i
+       iddl=3*(inode-1)+i
+       vector(iddl)=0.d0
+       do j=1,3
+        vector(iddl)=vector(iddl)+stress_new(igss)%val(i,j)*gradient(j,inode,igss)
+       enddo
+       vector(iddl)=vector(iddl)*wght(igss)
        !$omp atomic update
-       force(idof)=force(idof)+vector(3*inode+iddl)
+       force(idof)=force(idof)+vector(iddl)
       enddo
      enddo
     enddo
    enddo
    !$omp end do
-   !$omp end parallel
 ! *** prescribes boundary conditions
+   !$omp do schedule(static) private(idof,jdof,kdof)
    do idof=1,ndof
     if (bc_type(idof).eq.1) then
      force(idof)=0.d0
      do jdof=1,ndof
-      stiffness(correspond(idof,jdof))=0.d0
+      kdof=correspond(idof,jdof)
+      stiffness(kdof)=0.d0
      enddo
-     stiffness(correspond(idof,idof))=1.d0
+     kdof=correspond(idof,idof)
+     stiffness(kdof)=1.d0
     endif
     if (bc_type(idof).eq.2) then
+     !$omp atomic update
      force(idof)=force(idof)-bc_val(idof)*progress
     endif
    enddo
+   !$omp end do
+   !$omp end parallel
 ! *** calculates the residual
    residual_old=residual
    residual=0.d0
@@ -300,20 +332,28 @@ program fem_main
    endif
    phase=23 ! *** factorization + solution
    call pardiso(pt,maxfct,mnum,mtype,phase,ndof,stiffness,ia,ja,permutation,nrhs,iparm,msglvl,force,increment,error)
+   !$omp parallel default(shared)
+   !$omp do schedule(static) private(idof)
    do idof=1,ndof
     position_new(idof)=position_new(idof)-increment(idof)*damping
    enddo
+   !$omp end do
+   !$omp end parallel
   enddo
 ! *** updates variables
   time_old=time_new
+  !$omp parallel default(shared)
+  !$omp do schedule(static) private(idof,delta)
   do idof=1,ndof
    delta=position_new(idof)-position_old(idof)
    position_old(idof)=position_new(idof)
    position_new(idof)=position_old(idof)+delta
   enddo
-  do ielem=1,nelem
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
+  !$omp end do
+  !$omp do schedule(static) private(ielem,intg,igss,istat,delta)
+  do ielem=1,nelem3d
+   do intg=1,nntg_per_element3d
+    igss=(ielem-1)*nntg_per_element3d+intg
     internalenergy_old(igss)=internalenergy_new(igss)
     dissipatedenergy_old(igss)=dissipatedenergy_new(igss)
     stress_old(igss)=stress_new(igss)
@@ -325,6 +365,8 @@ program fem_main
     enddo
    enddo
   enddo
+  !$omp end do
+  !$omp end parallel
   if (freq.ne.0) then
    if (modulo(istp,freq).eq.0) then
     ifile=ifile+1
@@ -333,6 +375,7 @@ program fem_main
     filevtu="result"//trim(fil)//".vtu"
     call export_vtu(filevtu)
     call export_rct(1)
+    call export_nrg(1)
    endif
   endif
  enddo
@@ -340,6 +383,8 @@ program fem_main
  call export_vtu("result.vtu")
  call export_rct(1)
  call export_rct(2)
+ call export_nrg(1)
+ call export_nrg(2)
 ! *** cleans memory for PARDISO solver
  phase = 0
  call pardiso(pt,maxfct,mnum,mtype,phase,ndof,stiffness,ia,ja,permutation,nrhs,iparm,msglvl,force,increment,error)
@@ -354,13 +399,13 @@ subroutine build_csr_structure
  integer :: cnt
  allocate(tag(ndof,ndof))
  tag=0
- do ielem=1,nelem
-  do inode=1,nnode_per_element
+ do ielem=1,nelem3d
+  do inode=1,nnode_per_element3d
    do iddl=-2,0
-    idof=3*conn(inode,ielem)+iddl
-    do jnode=1,nnode_per_element
+    idof=3*connect3d(inode,ielem)+iddl
+    do jnode=1,nnode_per_element3d
      do jddl=-2,0
-      jdof=3*conn(jnode,ielem)+jddl
+      jdof=3*connect3d(jnode,ielem)+jddl
       tag(idof,jdof)=1
      enddo
     enddo
@@ -429,18 +474,27 @@ subroutine export_rct(iopt)
  case(1)
   write(20,'(1es12.4)',advance='no') time_old
   force=0.d0
-  do ielem=1,nelem
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
-    vector=matmul(transpose(derivative(:,:,igss)),reshape(stress_old(igss)%val(:,:),(/9/)))*wght(igss)
-    do inode=1,nnode_per_element
-     do iddl=-2,0
-      idof=3*conn(inode,ielem)+iddl
-      force(idof)=force(idof)+vector(3*inode+iddl)
+  !$omp parallel default(shared)
+  !$omp do schedule(static) private(ielem,intg,igss,vector,inode,iddl,idof,i,j)
+  do ielem=1,nelem3d
+   do intg=1,nntg_per_element3d
+    igss=(ielem-1)*nntg_per_element3d+intg
+    do inode=1,nnode_per_element3d
+     do i=1,3
+      idof=3*(connect3d(inode,ielem)-1)+i
+      iddl=3*(inode-1)+i
+      vector(iddl)=0.d0
+      do j=1,3
+       vector(iddl)=vector(iddl)+stress_old(igss)%val(i,j)*gradient(j,inode,igss)*wght(igss)
+      enddo
+      !$omp atomic update
+      force(idof)=force(idof)+vector(iddl)
      enddo
     enddo
    enddo
   enddo
+  !$omp end do
+  !$omp end parallel
   do idof=1,ndof
    if (bc_type(idof).eq.2) then
     force(idof)=force(idof)-bc_val(idof)*progress
@@ -454,8 +508,8 @@ subroutine export_rct(iopt)
    moment(1)=0.d0
    moment(2)=0.d0
    moment(3)=0.d0
-   do inode=1,nset_sizes(iset)
-    jnode=nset_nodes(iset,inode)
+   do inode=nset_start(iset),nset_end(iset)
+    jnode=nset_nodes(inode)
     idof=3*jnode-2
     jdof=3*jnode-1
     kdof=3*jnode
@@ -487,6 +541,30 @@ subroutine export_rct(iopt)
 
 end subroutine
 ! *******************************************************************
+! *** export_nrg
+! *******************************************************************
+subroutine export_nrg(iopt)
+ implicit none
+ integer :: iopt
+ real(8) :: dissipatedenergy,internalenergy
+ select case(iopt)
+ case(0)
+  open(unit=21, file="energy.out", status="replace", action="write")
+  write(21,'(" Time InternalEnergy"," DissipatedEnergy")')
+ case(1)
+  internalenergy=0.d0
+  dissipatedenergy=0.d0
+  do intg=1,nntg
+   internalenergy=internalenergy+internalenergy_old(intg)*wght(intg)
+   dissipatedenergy=dissipatedenergy+dissipatedenergy_old(intg)*wght(intg)
+  enddo
+  write(21,'(3es12.4)') time_old,internalenergy,dissipatedenergy
+ case(2)
+  close(unit=21)
+ end select
+
+end subroutine
+! *******************************************************************
 ! *** subroutine export_vtu
 ! *******************************************************************
 subroutine export_vtu(filename)
@@ -495,22 +573,22 @@ subroutine export_vtu(filename)
  real(8) :: stress(3,3),defgrad(3,3),state(nstat),energy
  integer :: vtk_type
 ! *** check element type: C3D4 or C3D8
- select case(nnode_per_element)
+ select case(nnode_per_element3d)
  case(4)
-  if (nntg_per_element.ne.1) then
-   write(*,*) 'Error export_vtu: C3D4 requires nntg_per_element=1'
+  if (nntg_per_element3d.ne.1) then
+   write(*,*) 'Error export_vtu: C3D4 requires nntg_per_element3d=1'
    stop
   endif
   vtk_type=10
  case(8)
-  if (nntg_per_element.ne.8) then
-   write(*,*) 'Error export_vtu: C3D8 requires nntg_per_element=8'
+  if (nntg_per_element3d.ne.8) then
+   write(*,*) 'Error export_vtu: C3D8 requires nntg_per_element3d=8'
    stop
   endif
   vtk_type=12
  case(10)
-  if (nntg_per_element.ne.4) then
-   write(*,*) 'Error export_vtu: C3D10 requires nntg_per_element=4'
+  if (nntg_per_element3d.ne.4) then
+   write(*,*) 'Error export_vtu: C3D10 requires nntg_per_element3d=4'
    stop
   endif
   vtk_type=24
@@ -523,7 +601,7 @@ subroutine export_vtu(filename)
   write(unit,'(a)') '<?xml version="1.0"?>'
   write(unit,'(a)') '<VTKFile type="UnstructuredGrid" version="0.1" byte_order="LittleEndian">'
   write(unit,'(a)') '  <UnstructuredGrid>'
-  write(unit,'(a,I0,a,I0,a)') '    <Piece NumberOfPoints="',nnode,'" NumberOfCells="',nelem,'">'
+  write(unit,'(a,I0,a,I0,a)') '    <Piece NumberOfPoints="',nnode,'" NumberOfCells="',nelem3d,'">'
   write(unit,'(a)') '      <Points>'
   write(unit,'(a)') '        <DataArray type="Float64" NumberOfComponents="3" format="ascii">'
   do inode=1,nnode
@@ -536,20 +614,20 @@ subroutine export_vtu(filename)
   write(unit,'(a)') '      </Points>'
   write(unit,'(a)') '      <Cells>'
   write(unit,'(a)') '        <DataArray type="Int32" Name="connectivity" format="ascii">'
-  do ielem=1,nelem
-   do inode=1,nnode_per_element
-    write(unit,'(I0,1X)',advance='no') conn(inode,ielem)-1
+  do ielem=1,nelem3d
+   do inode=1,nnode_per_element3d
+    write(unit,'(I0,1X)',advance='no') connect3d(inode,ielem)-1
    enddo
    write(unit,*)
   enddo
   write(unit,'(a)') '        </DataArray>'
   write(unit,'(a)') '        <DataArray type="Int32" Name="offsets" format="ascii">'
-  do ielem=1,nelem
-   write(unit,'(I0)') ielem*nnode_per_element
+  do ielem=1,nelem3d
+   write(unit,'(I0)') ielem*nnode_per_element3d
   enddo
   write(unit,'(a)') '        </DataArray>'
   write(unit,'(a)') '        <DataArray type="UInt8" Name="types" format="ascii">'
-  do ielem=1,nelem
+  do ielem=1,nelem3d
    write(unit,'(I0)') vtk_type
   enddo
   write(unit,'(a)') '        </DataArray>'
@@ -557,12 +635,12 @@ subroutine export_vtu(filename)
   write(unit,'(a)') '      <CellData Scalars="scalars">'
 ! *** Compute average stress tensor
   write(unit,'(a)') '        <DataArray type="Float64" Name="Stress" NumberOfComponents="9" format="ascii">'
-  do ielem=1,nelem
+  do ielem=1,nelem3d
    do i=1,3
     do j=1,3
      stress(i,j)=0.d0
-     do intg=1,nntg_per_element
-      igss=(ielem-1)*nntg_per_element+intg
+     do intg=1,nntg_per_element3d
+      igss=(ielem-1)*nntg_per_element3d+intg
       stress(i,j)=stress(i,j)+wght(igss)*stress_old(igss)%val(i,j)/volume(ielem)
      enddo
     enddo
@@ -572,12 +650,12 @@ subroutine export_vtu(filename)
   write(unit,'(a)') '        </DataArray>'
 ! *** Compute average deformation gradient
   write(unit,'(a)') '        <DataArray type="Float64" Name="DeformationGradient" NumberOfComponents="9" format="ascii">'
-  do ielem=1,nelem
+  do ielem=1,nelem3d
    do i=1,3
     do j=1,3
      defgrad(i,j)=0.d0
-     do intg=1,nntg_per_element
-      igss=(ielem-1)*nntg_per_element+intg
+     do intg=1,nntg_per_element3d
+      igss=(ielem-1)*nntg_per_element3d+intg
       defgrad(i,j)=defgrad(i,j)+wght(igss)*defgrad_old(igss)%val(i,j)/volume(ielem)
      enddo
     enddo
@@ -588,11 +666,11 @@ subroutine export_vtu(filename)
 ! *** Compute average state variables
   if (nstat.gt.0) then
    write(unit,'(a,I1,a)') '        <DataArray type="Float64" Name="StateVariable" NumberOfComponents="',nstat,'" format="ascii">'
-   do ielem=1,nelem
+   do ielem=1,nelem3d
     do istat=1,nstat
      state(istat)=0.d0
-     do intg=1,nntg_per_element
-      igss=(ielem-1)*nntg_per_element+intg
+     do intg=1,nntg_per_element3d
+      igss=(ielem-1)*nntg_per_element3d+intg
       state(istat)=state(istat)+wght(igss)*state_old(istat,igss)/volume(ielem)
      enddo
     enddo
@@ -605,10 +683,10 @@ subroutine export_vtu(filename)
   endif
 ! *** Compute average internal energy
   write(unit,'(a)') '        <DataArray type="Float64" Name="InternalEnergy" NumberOfComponents="1" format="ascii">'
-  do ielem=1,nelem
+  do ielem=1,nelem3d
    energy=0.d0
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
+   do intg=1,nntg_per_element3d
+    igss=(ielem-1)*nntg_per_element3d+intg
     energy=energy+wght(igss)*internalenergy_old(igss)/volume(ielem)
    enddo
    write(unit,'(1E16.6E3)') energy
@@ -616,10 +694,10 @@ subroutine export_vtu(filename)
   write(unit,'(a)') '        </DataArray>'
 ! *** Compute average dissipated energy
   write(unit,'(a)') '        <DataArray type="Float64" Name="DissipatedEnergy" NumberOfComponents="1" format="ascii">'
-  do ielem=1,nelem
+  do ielem=1,nelem3d
    energy=0.d0
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
+   do intg=1,nntg_per_element3d
+    igss=(ielem-1)*nntg_per_element3d+intg
     energy=energy+wght(igss)*dissipatedenergy_old(igss)/volume(ielem)
    enddo
    write(unit,'(1E16.6E3)') energy
@@ -633,134 +711,13 @@ subroutine export_vtu(filename)
 
 end subroutine export_vtu
 ! *******************************************************************
-! *** subroutine export_vtu
-! *******************************************************************
-subroutine export_vtu_old(filename)
- implicit none
- character(*), intent(in) :: filename
- real(8) :: stress(3,3),defgrad(3,3),state(nstat),energy
-
- open(newunit=unit, file=filename, status="replace", action="write")
-  write(unit,'(a)') '<?xml version="1.0"?>'
-  write(unit,'(a)') '<VTKFile type="UnstructuredGrid" version="0.1" byte_order="LittleEndian">'
-  write(unit,'(a)') '  <UnstructuredGrid>'
-  write(unit,'(a,I6,a,I6,a)') '    <Piece NumberOfPoints="', nnode, '" NumberOfCells="', nelem, '">'
-  write(unit,'(a)') '      <Points>'
-  write(unit,'(a)') '        <DataArray type="Float64" NumberOfComponents="3" format="ascii">'
-  do inode=1,nnode
-   idof=3*inode-2
-   jdof=3*inode-1
-   kdof=3*inode
-   write(unit,'(3E16.6E3)') position_old(idof),position_old(jdof),position_old(kdof)
-!    write(unit,'(3E14.6E3)') coords(1,inode),coords(2,inode),0.0d0
-  end do
-  write(unit,'(a)') '        </DataArray>'
-  write(unit,'(a)') '      </Points>'
-  ! Connectivité
-  write(unit,'(a)') '      <Cells>'
-  write(unit,'(a)') '        <DataArray type="Int32" Name="connectivity" format="ascii">'
-  do ielem=1,nelem
-   do inode=1,(nnode_per_element-1)
-     write(unit,'(I8)',advance='no') conn(inode,ielem)-1
-   enddo
-   write(unit,'(I8)',advance='yes') conn(inode,ielem)-1
-!     write(unit,'(3I8)') conn(1,ielem)-1,conn(2,ielem)-1,conn(3,ielem)-1  ! VTK uses 0-based indexing
-  end do
-  write(unit,'(a)') '        </DataArray>'
-  ! Offsets
-  write(unit,'(a)') '        <DataArray type="Int32" Name="offsets" format="ascii">'
-  do ielem=1,nelem
-    write(unit,'(I8)') ielem * nnode_per_element
-  end do
-  write(unit,'(a)') '        </DataArray>'
-  write(unit,'(a)') '        <DataArray type="UInt8" Name="types" format="ascii">'
-  do ielem=1,nelem
-    write(unit,'(I8)') 12
-  end do
-  write(unit,'(a)') '        </DataArray>'
-  write(unit,'(a)') '      </Cells>'
-  write(unit,'(a)') '      <CellData Scalars="scalars">'
-  write(unit,'(a)') '        <DataArray type="Float64" Name="Stress" NumberOfComponents="9" format="ascii">'
-  do ielem=1,nelem
-   do i=1,3
-    do j=1,3
-     stress(i,j)=0.d0
-     do intg=1,nntg_per_element
-      igss=(ielem-1)*nntg_per_element+intg
-      stress(i,j)=stress(i,j)+wght(igss)*stress_old(igss)%val(i,j)/volume(ielem)
-     enddo
-    enddo
-   enddo
-   write(unit,'(9E16.6E3)') ((stress(i,j),j=1,3),i=1,3)
-  end do
-  write(unit,*) '        </DataArray>'
-  write(unit,'(a)') '        <DataArray type="Float64" Name="DeformationGradient" NumberOfComponents="9" format="ascii">'
-  do ielem=1,nelem
-   do i=1,3
-    do j=1,3
-     defgrad(i,j)=0.d0
-     do intg=1,nntg_per_element
-      igss=(ielem-1)*nntg_per_element+intg
-      defgrad(i,j)=defgrad(i,j)+wght(igss)*defgrad_old(igss)%val(i,j)/volume(ielem)
-     enddo
-    enddo
-   enddo
-   write(unit,'(9E16.6E3)') ((defgrad(i,j),j=1,3),i=1,3)
-  end do
-  write(unit,'(a)') '        </DataArray>'
-  if (nstat.gt.0) then
-   write(unit,'(a,I1,a)') '        <DataArray type="Float64" Name="StateVariable" NumberOfComponents="',nstat,'" format="ascii">'
-   do ielem=1,nelem
-    do istat=1,nstat
-     state(istat)=0.d0
-     do intg=1,nntg_per_element
-      igss=(ielem-1)*nntg_per_element+intg
-      state(istat)=state(istat)+wght(igss)*state_old(istat,igss)/volume(ielem)
-     enddo
-    enddo
-    do istat=1,nstat-1
-     write(unit,'(1E16.6E3)',advance='no') state(istat)
-    enddo
-    write(unit,'(1E16.6E3)',advance='yes') state(nstat)
-   end do
-   write(unit,'(a)') '        </DataArray>'
-  endif
-  write(unit,'(a)') '        <DataArray type="Float64" Name="InternalEnergy" NumberOfComponents="1" format="ascii">'
-  do ielem=1,nelem
-   energy=0.d0
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
-    energy=energy+wght(igss)*internalenergy_old(igss)/volume(ielem)
-   enddo
-   write(unit,'(1E16.6E3)') energy
-  enddo
-  write(unit,'(a)') '        </DataArray>'
-  write(unit,'(a)') '        <DataArray type="Float64" Name="DissipatedEnergy" NumberOfComponents="1" format="ascii">'
-  do ielem=1,nelem
-   energy=0.d0
-   do intg=1,nntg_per_element
-    igss=(ielem-1)*nntg_per_element+intg
-    energy=energy+wght(igss)*dissipatedenergy_old(igss)/volume(ielem)
-   enddo
-   write(unit,'(1E16.6E3)') energy
-  enddo
-  write(unit,'(a)') '        </DataArray>'
-  write(unit,'(a)') '      </CellData>'
-  write(unit,'(a)') '    </Piece>'
-  write(unit,'(a)') '  </UnstructuredGrid>'
-  write(unit,'(a)') '</VTKFile>'
- close(unit)
-
-end subroutine
-
-! *******************************************************************
 ! *** subroutine tetrahedronT4
 ! *******************************************************************
-subroutine tetrahedronT4(x,y,z,B,L,W,V)
+subroutine tetrahedronT4(x,y,z,N,G,L,W,V)
  implicit none
  real(8), intent(in)  :: x(4),y(4),z(4)
- real(8), intent(out) :: B(9,12,1),W(1),V,L(3,1)
- real(8) :: dN(4,3)
+ real(8), intent(out) :: W(1),V,L(3,1),N(4,1),G(3,4,1)
+ real(8) :: B(9,12,1),dN(4,3)
  real(8) :: dNdx(4),dNdy(4),dNdz(4)
  real(8) :: J(3,3),detJ,invJ(3,3)
  integer :: i
@@ -772,6 +729,10 @@ subroutine tetrahedronT4(x,y,z,B,L,W,V)
 
  ! *** Shape function derivatives in natural coordinates
  !     N1=1-xi-eta-zeta, N2=xi, N3=eta, N4=zeta
+ N(1,1)=0.25d0
+ N(2,1)=0.25d0
+ N(3,1)=0.25d0
+ N(4,1)=0.25d0
  dN(1,:)=(/-1.d0,-1.d0,-1.d0/)
  dN(2,:)=(/ 1.d0, 0.d0, 0.d0/)
  dN(3,:)=(/ 0.d0, 1.d0, 0.d0/)
@@ -824,6 +785,9 @@ subroutine tetrahedronT4(x,y,z,B,L,W,V)
   dNdz(i)=invJ(1,3)*dN(i,1) &
          +invJ(2,3)*dN(i,2) &
          +invJ(3,3)*dN(i,3)
+  G(1,i,1)=dNdx(i)
+  G(2,i,1)=dNdy(i)
+  G(3,i,1)=dNdz(i)
  enddo
 
  ! *** Integration point: centroid
@@ -854,11 +818,11 @@ end subroutine tetrahedronT4
 ! *** Quadratic tetrahedron, 10 nodes (C3D10)
 ! *** 4 integration points
 ! *******************************************************************
-subroutine tetrahedronT10(x,y,z,B,L,W,V)
+subroutine tetrahedronT10(x,y,z,N,G,L,W,V)
  implicit none
  real(8), intent(in)  :: x(10),y(10),z(10)
- real(8), intent(out) :: B(9,30,4),W(4),V,L(3,4)
- real(8) :: N(10),dN(10,3)
+ real(8), intent(out) :: W(4),V,L(3,4),N(10,4),G(3,10,4)
+ real(8) :: B(9,30,4),dN(10,3)
  real(8) :: dNdx(10),dNdy(10),dNdz(10)
  real(8) :: J(3,3),detJ,invJ(3,3)
  real(8) :: r,s,t,lam(4),dlam(4,3)
@@ -902,20 +866,20 @@ subroutine tetrahedronT10(x,y,z,B,L,W,V)
   lam(4)=t
 ! *** Shape functions
   do i=1,4
-   N(i)=lam(i)*(2.d0*lam(i)-1.d0)
+   N(i,p)=lam(i)*(2.d0*lam(i)-1.d0)
   enddo
-  N(5)=4.d0*lam(1)*lam(2)
-  N(6)=4.d0*lam(2)*lam(3)
-  N(7)=4.d0*lam(3)*lam(1)
-  N(8)=4.d0*lam(1)*lam(4)
-  N(9)=4.d0*lam(2)*lam(4)
-  N(10)=4.d0*lam(3)*lam(4)
+  N(5,p)=4.d0*lam(1)*lam(2)
+  N(6,p)=4.d0*lam(2)*lam(3)
+  N(7,p)=4.d0*lam(3)*lam(1)
+  N(8,p)=4.d0*lam(1)*lam(4)
+  N(9,p)=4.d0*lam(2)*lam(4)
+  N(10,p)=4.d0*lam(3)*lam(4)
 ! *** Physical coordinates of integration point
   L(:,p)=0.d0
   do i=1,10
-   L(1,p)=L(1,p)+N(i)*x(i)
-   L(2,p)=L(2,p)+N(i)*y(i)
-   L(3,p)=L(3,p)+N(i)*z(i)
+   L(1,p)=L(1,p)+N(i,p)*x(i)
+   L(2,p)=L(2,p)+N(i,p)*y(i)
+   L(3,p)=L(3,p)+N(i,p)*z(i)
   enddo
 ! *** Derivatives of shape functions in natural coordinates
   do i=1,4
@@ -970,6 +934,9 @@ subroutine tetrahedronT10(x,y,z,B,L,W,V)
    dNdz(i)=invJ(1,3)*dN(i,1) &
           +invJ(2,3)*dN(i,2) &
           +invJ(3,3)*dN(i,3)
+   G(1,i,p)=dNdx(i)
+   G(2,i,p)=dNdy(i)
+   G(3,i,p)=dNdz(i)
   enddo
 ! *** Displacement-gradient matrix B
   B(:,:,p)=0.d0
@@ -993,11 +960,11 @@ end subroutine tetrahedronT10
 ! *******************************************************************
 ! *** subroutine hexahedronH8
 ! *******************************************************************
-subroutine hexahedronH8(x,y,z,B,L,W,V)
+subroutine hexahedronH8(x,y,z,N,G,L,W,V)
  implicit none
  real(8), intent(in)  :: x(8),y(8),z(8)
- real(8), intent(out) :: B(9,24,8),W(8),V,L(3,8)
- real(8) :: N(8),dN(8,3)
+ real(8), intent(out) :: W(8),V,L(3,8),N(8,8),G(3,8,8)
+ real(8) :: B(9,24,8),dN(8,3)
  real(8) :: dNdx(8),dNdy(8),dNdz(8)
  real(8) :: J(3,3),detJ,invJ(3,3)
  real(8) :: xi,eta,zeta
@@ -1015,14 +982,14 @@ subroutine hexahedronH8(x,y,z,B,L,W,V)
   zeta= q*dble(sz(p))
  ! *** Evaluates shape functions
   do i=1,8
-   N(i)=0.125d0*(1.d0+dble(sx(i))*xi)*(1.d0+dble(sy(i))*eta)*(1.d0+dble(sz(i))*zeta)
+   N(i,p)=0.125d0*(1.d0+dble(sx(i))*xi)*(1.d0+dble(sy(i))*eta)*(1.d0+dble(sz(i))*zeta)
   enddo
  ! *** Physical coordinates of the Gauss point
   L(:,p)=0.d0
   do i=1,8
-   L(1,p)=L(1,p)+N(i)*x(i)
-   L(2,p)=L(2,p)+N(i)*y(i)
-   L(3,p)=L(3,p)+N(i)*z(i)
+   L(1,p)=L(1,p)+N(i,p)*x(i)
+   L(2,p)=L(2,p)+N(i,p)*y(i)
+   L(3,p)=L(3,p)+N(i,p)*z(i)
   enddo
  ! *** Derivatives of shape functions in natural coordinates
   do i=1,8
@@ -1073,6 +1040,9 @@ subroutine hexahedronH8(x,y,z,B,L,W,V)
    dNdz(i)=invJ(1,3)*dN(i,1) &
           +invJ(2,3)*dN(i,2) &
           +invJ(3,3)*dN(i,3)
+   G(1,i,p)=dNdx(i)
+   G(2,i,p)=dNdy(i)
+   G(3,i,p)=dNdz(i)
   enddo
  ! *** Displacement-gradient matrix B
   B(:,:,p)=0.d0
@@ -1094,125 +1064,174 @@ subroutine hexahedronH8(x,y,z,B,L,W,V)
 
 end subroutine hexahedronH8
 ! *******************************************************************
+! *** subroutine quadrangleQ4
+! *******************************************************************
+subroutine quadrangleQ4(x,y,z,N,W,S)
+ implicit none
+ real(8), intent(in)  :: x(4), y(4), z(4)
+ real(8), intent(out) :: N(4,4), W(4), S
+ real(8) :: xi(4), eta(4)
+ real(8) :: a
+ real(8) :: dNdxi(4), dNdeta(4)
+ real(8) :: xr,xs,yr,ys,zr,zs
+ real(8) :: cx,cy,cz,Js
+ integer :: g,i
+
+! *** local coordinates and weights of integration points
+ a = 1.d0/sqrt(3.d0)
+ xi(1) = -a
+ xi(2) =  a
+ xi(3) =  a
+ xi(4) = -a
+ eta(1) = -a
+ eta(2) = -a
+ eta(3) =  a
+ eta(4) =  a
+ S = 0.d0
+! *** loop over integration points
+ do g = 1,4
+! *** interpolation functions
+  N(1,g) = 0.25d0*(1.d0-xi(g))*(1.d0-eta(g))
+  N(2,g) = 0.25d0*(1.d0+xi(g))*(1.d0-eta(g))
+  N(3,g) = 0.25d0*(1.d0+xi(g))*(1.d0+eta(g))
+  N(4,g) = 0.25d0*(1.d0-xi(g))*(1.d0+eta(g))
+! *** derivatives wrt local coordinates
+  dNdxi(1) = -0.25d0*(1.d0-eta(g))
+  dNdxi(2) =  0.25d0*(1.d0-eta(g))
+  dNdxi(3) =  0.25d0*(1.d0+eta(g))
+  dNdxi(4) = -0.25d0*(1.d0+eta(g))
+  dNdeta(1) = -0.25d0*(1.d0-xi(g))
+  dNdeta(2) = -0.25d0*(1.d0+xi(g))
+  dNdeta(3) =  0.25d0*(1.d0+xi(g))
+  dNdeta(4) =  0.25d0*(1.d0-xi(g))
+! *** jacobian
+  xr = 0.d0
+  xs = 0.d0
+  yr = 0.d0
+  ys = 0.d0
+  zr = 0.d0
+  zs = 0.d0
+  do i = 1,4
+   xr = xr+dNdxi(i)*x(i)
+   xs = xs+dNdeta(i)*x(i)
+   yr = yr+dNdxi(i)*y(i)
+   ys = ys+dNdeta(i)*y(i)
+   zr = zr+dNdxi(i)*z(i)
+   zs = zs+dNdeta(i)*z(i)
+  enddo
+! *** cross product
+  cx = yr*zs-zr*ys
+  cy = zr*xs-xr*zs
+  cz = xr*ys-yr*xs
+  Js = sqrt(cx*cx+cy*cy+cz*cz)
+! *** physical weights and total area
+  W(g) = Js
+  S = S+W(g)
+ enddo
+
+end subroutine quadrangleQ4
+! *******************************************************************
 ! *** subroutine triangleT6
 ! *******************************************************************
-subroutine triangleT6(x,y,B,L,W,A)
+subroutine triangleT6(x,y,z,N,W,S)
  implicit none
- real(8), intent(in) :: x(6),y(6)      ! Coordonnées (x,y) des 6 nœuds
- real(8), intent(out):: B(4,12,3),W(3),A,L(2,3)
- real(8) :: dNdx(6),dNdy(6),N(6),dN(6,2)
- real(8) :: J(2,2),detJ,invJ(2,2)
+ real(8), intent(in)  :: x(6), y(6), z(6)
+ real(8), intent(out) :: N(6,3), W(3), S
+ real(8) :: xi(3), eta(3), wg(3)
  real(8) :: L1,L2,L3
- integer :: i,p
- real(8), parameter :: gauss(2,3)=(/1.d0/6.d0,1.d0/6.d0,2.d0/3.d0,1.d0/6.d0,1.d0/6.d0,2.d0/3.d0/)
- real(8), parameter :: wght(3) = (/1.d0/3.d0,1d0/3d0,1d0/3.d0/)
- real(8) :: xg,yg
-
- A=0.d0
- do p=1,3
-! *** evaluates element coordinates
-  L1=1.d0-gauss(1,p)-gauss(2,p)
-  L2=gauss(1,p)
-  L3=gauss(2,p)
-! *** evaluates shape functions
-  N(1)=L1*(2d0*L1-1d0)
-  N(2)=L2*(2d0*L2-1d0)
-  N(3)=L3*(2d0*L3-1d0)
-  N(4)=4d0*L1*L2
-  N(5)=4d0*L2*L3
-  N(6)=4d0*L3*L1
-  L(:,p)=0.d0
-  do i=1,6
-   L(1,p)=L(1,p)+N(i)*x(i)
-   L(2,p)=L(2,p)+N(i)*y(i)
+ real(8) :: dNdxi(6), dNdeta(6)
+ real(8) :: xr,xs,yr,ys,zr,zs
+ real(8) :: cx,cy,cz,Js
+ integer :: g,a
+! *** local coordinates and weights of integration points
+ xi(1) = 1.d0/6.d0
+ xi(2) = 2.d0/3.d0
+ xi(3) = 1.d0/6.d0
+ eta(1) = 1.d0/6.d0
+ eta(2) = 1.d0/6.d0
+ eta(3) = 2.d0/3.d0
+ wg(:) = 1.d0/6.d0
+ S = 0.d0
+! *** loop over integration points
+ do g = 1,3
+  L1 = 1.d0-xi(g)-eta(g)
+  L2 = xi(g)
+  L3 = eta(g)
+! *** interpolation functions
+  N(1,g) = L1*(2.d0*L1-1.d0)
+  N(2,g) = L2*(2.d0*L2-1.d0)
+  N(3,g) = L3*(2.d0*L3-1.d0)
+  N(4,g) = 4.d0*L1*L2
+  N(5,g) = 4.d0*L2*L3
+  N(6,g) = 4.d0*L3*L1
+! *** derivatives wrt local coordinates
+  dNdxi(1) = -(4.d0*L1-1.d0)
+  dNdxi(2) =  4.d0*L2-1.d0
+  dNdxi(3) =  0.d0
+  dNdxi(4) =  4.d0*(L1-L2)
+  dNdxi(5) =  4.d0*L3
+  dNdxi(6) = -4.d0*L3
+  dNdeta(1) = -(4.d0*L1-1.d0)
+  dNdeta(2) =  0.d0
+  dNdeta(3) =  4.d0*L3-1.d0
+  dNdeta(4) = -4.d0*L2
+  dNdeta(5) =  4.d0*L2
+  dNdeta(6) =  4.d0*(L1-L3)
+! *** jacobian
+  xr = 0.d0
+  xs = 0.d0
+  yr = 0.d0
+  ys = 0.d0
+  zr = 0.d0
+  zs = 0.d0
+  do a = 1,6
+   xr = xr + dNdxi(a)*x(a)
+   xs = xs + dNdeta(a)*x(a)
+   yr = yr + dNdxi(a)*y(a)
+   ys = ys + dNdeta(a)*y(a)
+   zr = zr + dNdxi(a)*z(a)
+   zs = zs + dNdeta(a)*z(a)
   enddo
-!   write(*,'("GAUSS POINT",2es12.4)') xg,yg
-! *** evaluates shape function derivatives wrt element coordinates
-  dN(1,1)=4.d0*gauss(1,p)+4.d0*gauss(2,p)-3.d0
-  dN(1,2)=4.d0*gauss(2,p)+4.d0*gauss(1,p)-3.d0
-  dN(2,1)=4.d0*gauss(1,p)-1.d0
-  dN(2,2)=0.d0
-  dN(3,1)=0.d0
-  dN(3,2)=4.d0*gauss(2,p)-1.d0
-  dN(4,1)=4.d0-8.d0*gauss(1,p)-4.d0*gauss(2,p)
-  dN(4,2)=-4.d0*gauss(1,p)
-  dN(5,1)=4.d0*gauss(2,p)
-  dN(5,2)=4.d0*gauss(1,p)
-  dN(6,1)=-4.d0*gauss(2,p)
-  dN(6,2)=4.d0-8.d0*gauss(2,p)-4.d0*gauss(1,p)
-! *** evaluates the Jacobian and its determinant
-  J(:,:)=0.d0
-  do i=1,6
-   J(1,1)=J(1,1)+dN(i,1)*x(i)
-   J(1,2)=J(1,2)+dN(i,2)*x(i)
-   J(2,1)=J(2,1)+dN(i,1)*y(i)
-   J(2,2)=J(2,2)+dN(i,2)*y(i)
-  enddo
-!   write(*,'("Jacobian",2es12.4)') J
-  detJ=J(1,1)*J(2,2)-J(1,2)*J(2,1)
-  if (detJ.le.0.d0) then
-   write(*,'("Negative jacobian in TriangleT6")')
-   stop
-  endif
-! *** evaluates the Jacobian inverse
-  invJ(1,1)=J(2,2)/detJ
-  invJ(1,2)=-J(1,2)/detJ
-  invJ(2,1)=-J(2,1)/detJ
-  invJ(2,2)=J(1,1)/detJ
-! *** evaluates the derivative of the wght functions
-  do i = 1,6
-   dNdx(i)=invJ(1,1)*dN(i,1)+invJ(2,1)*dN(i,2) ! *** to be verified
-   dNdy(i)=invJ(1,2)*dN(i,1)+invJ(2,2)*dN(i,2) ! *** to be verified
-  end do
-  do i = 1,6
-   B(1,2*i-1,p)=dNdx(i)
-   B(2,2*i,p)=dNdy(i)
-   B(3,2*i-1,p)=dNdy(i)
-   B(4,2*i,p)=dNdx(i)
-  end do
-  W(p)=detJ*wght(p)*.5d0
-  A=A+W(p)
+! *** cross product
+  cx = yr*zs-zr*ys
+  cy = zr*xs-xr*zs
+  cz = xr*ys-yr*xs
+  Js = sqrt(cx*cx+cy*cy+cz*cz)
+! *** physical weights and total surface
+  W(g) = wg(g)*Js
+  S = S+W(g)
  enddo
 
 end subroutine triangleT6
 ! *******************************************************************
 ! *** subroutine triangleT3
 ! *******************************************************************
-subroutine triangleT3(x, y, B, L, W, A)
+subroutine triangleT3(x,y,z,N,W,S)
  implicit none
- real(8), intent(in) :: x(3), y(3)  ! material coordinates of three nodes
- real(8) :: B(4,6,1), W(1), A, L(2,1)
- integer :: i
-! Calcul de l'aire du triangle
- A = 0.5d0 * ((x(2)-x(1))*(y(3)-y(1)) - (x(3)-x(1))*(y(2)-y(1)))
- B(1,1,1)=(y(2)-y(3))/(2.0d0*A) ! *** dN1/dx
- B(2,1,1)=0.d0
- B(3,1,1)=(x(3)-x(2))/(2.0d0*A) ! *** dN1/dy
- B(4,1,1)=0.d0
- B(1,2,1)=0.d0
- B(2,2,1)=(x(3)-x(2))/(2.0d0*A) ! *** dN1/dy
- B(3,2,1)=0.d0
- B(4,2,1)=(y(2)-y(3))/(2.0d0*A) ! *** dN1/dx
- B(1,3,1)=(y(3)-y(1))/(2.0d0*A) ! *** dN2/dx
- B(2,3,1)=0.d0
- B(3,3,1)=(x(1)-x(3))/(2.0d0*A) ! *** dN2/dy
- B(4,3,1)=0.d0
- B(1,4,1)=0.d0
- B(2,4,1)=(x(1)-x(3))/(2.0d0*A) ! *** dN2/dy
- B(3,4,1)=0.d0
- B(4,4,1)=(y(3)-y(1))/(2.0d0*A) ! *** dN2/dx
- B(1,5,1)=(y(1)-y(2))/(2.0d0*A) ! *** dN3/dx
- B(2,5,1)=0.d0
- B(3,5,1)=(x(2)-x(1))/(2.0d0*A) ! *** dN3/dy
- B(4,5,1)=0.d0
- B(1,6,1)=0.d0
- B(2,6,1)=(x(2)-x(1))/(2.0d0*A) ! *** dN3/dy
- B(3,6,1)=0.d0
- B(4,6,1)=(y(1)-y(2))/(2.0d0*A) ! *** dN3/dx
- W(1)=A
-
- L(1,1)=(x(1)+x(2)+x(3))/3.d0
- L(2,1)=(y(1)+y(2)+y(3))/3.d0
+ real(8), intent(in)  :: x(3), y(3), z(3)
+ real(8), intent(out) :: N(3,1), W(1), S
+ real(8) :: xr,yr,zr
+ real(8) :: xs,ys,zs
+ real(8) :: cx,cy,cz,Js
+! *** interpolation functions
+  N(1,1) = 1.d0/3.d0
+  N(2,1) = 1.d0/3.d0
+  N(3,1) = 1.d0/3.d0
+! *** derivatives wrt local coordinates
+  xr = x(2)-x(1)
+  yr = y(2)-y(1)
+  zr = z(2)-z(1)
+  xs = x(3)-x(1)
+  ys = y(3)-y(1)
+  zs = z(3)-z(1)
+! *** cross product
+  cx = yr*zs-zr*ys
+  cy = zr*xs-xr*zs
+  cz = xr*ys-yr*xs
+  Js = sqrt(cx*cx+cy*cy+cz*cz)
+! *** physical weights and total surface
+  W(1) = Js/2.d0
+  S = W(1)
 
 end subroutine triangleT3
 ! *******************************************************************
@@ -1223,7 +1242,7 @@ subroutine read_material(filename,cname,nstat,nprop,props)
  character(80) :: filename, line
  integer, intent(out) :: nstat,nprop
  real(8), allocatable, intent(out) :: props(:)
- integer :: unit
+ integer :: unit,iprop
  open(newunit=unit, file=filename, status='old')
   read(unit,'(a)') line
   read(unit,'(a)') cname
@@ -1233,18 +1252,20 @@ subroutine read_material(filename,cname,nstat,nprop,props)
   read(unit,*) nprop
   allocate(props(nprop))
   read(unit,'(a)') line
-  read(unit,*) props(:)
+  do iprop=1,nprop
+   read(unit,*) props(iprop)
+  enddo
  close(unit)
 end subroutine
 ! *******************************************************************
 ! *** subroutine read_msh
 ! *******************************************************************
-subroutine read_msh(filename, coords, conn, nnode, nelem)
+subroutine read_msh(filename, coords, connect3d, nnode, nelem3d)
  implicit none
  character(len=*), intent(in) :: filename
- integer, intent(out) :: nnode, nelem
+ integer, intent(out) :: nnode, nelem3d
  real(8), allocatable, intent(out) :: coords(:,:)
- integer, allocatable, intent(out) :: conn(:,:)
+ integer, allocatable, intent(out) :: connect3d(:,:)
  integer :: i, id, etype, ntags, tag1, tag2
  integer :: node1, node2, node3
  character(len=256) :: line
@@ -1266,21 +1287,21 @@ subroutine read_msh(filename, coords, conn, nnode, nelem)
    if (trim(line) == '$Elements') exit
   end do
   read(unit,*) num_elem
-  allocate(conn(3, num_elem)) ! sur-allocation temporaire
-  nelem = 0
+  allocate(connect3d(3, num_elem)) ! sur-allocation temporaire
+  nelem3d = 0
   do i = 1, num_elem
    read(unit,*) id, etype, ntags, tag1, tag2, node1, node2, node3
    if (etype == 2) then ! triangle linéaire
-    nelem = nelem + 1
-    conn(1, nelem) = node1
-    conn(2, nelem) = node2
-    conn(3, nelem) = node3
+    nelem3d = nelem3d + 1
+    connect3d(1, nelem3d) = node1
+    connect3d(2, nelem3d) = node2
+    connect3d(3, nelem3d) = node3
    end if
   end do
-  if (nelem < num_elem) then
-   call move_alloc(conn, conn)
-   allocate(conn(3, nelem))
-   conn = conn(:, 1:nelem)
+  if (nelem3d < num_elem) then
+   call move_alloc(connect3d, connect3d)
+   allocate(connect3d(3, nelem3d))
+   connect3d = connect3d(:, 1:nelem3d)
   end if
 
  close(unit)
@@ -1313,15 +1334,21 @@ subroutine read_step(filename)
  implicit none
  character(len=*), intent(in) :: filename
  character(len=256) :: line
- logical :: reading_step,reading_disp,reading_force
- integer :: i,j,nbc,iset,inode,jnode,bc_axis
+ logical :: reading_step,reading_disp,reading_force,reading_pressure
+ integer :: i,j,nbc,iset,inode,jnode,bc_axis,jelem
  character(len=64) :: bc_name
  real(8) :: bc_value
+ real(8) :: area
+ real(8), allocatable :: interpolation2D(:,:),wght2D(:)
 
+ allocate(interpolation2D(nnode_per_element2d,nntg_per_element2d),wght2D(nntg_per_element2d))
+ allocate(x(nnode_per_element2d),y(nnode_per_element2d),z(nnode_per_element2d))
  reading_step=.false.
  reading_disp=.false.
  reading_force=.false.
+ reading_pressure=.false.
  bc_type(:)=0
+ bc_val(:)=0.d0
  open(unit=10, file=filename, status='old')
  do
   read(10,'(A)', end=100) line
@@ -1334,14 +1361,22 @@ subroutine read_step(filename)
    if (index(line, "*DISPLACEMENT") > 0) then
     reading_disp=.true.
     reading_force=.false.
+    reading_pressure=.false.
     cycle
    endif
    if (index(line, "*FORCE") > 0) then
     reading_disp=.false.
     reading_force=.true.
+    reading_pressure=.false.
     cycle
    endif
-   if (not(reading_disp.or.reading_force)) then
+   if (index(line, "*PRESSURE") > 0) then
+    reading_disp=.false.
+    reading_force=.false.
+    reading_pressure=.true.
+    cycle
+   endif
+   if (not(reading_disp.or.reading_force.or.reading_pressure)) then
     read(line,*) duration,dtime,dtime_min,dtime_max
     write(*,'("Duration",es12.4)') duration
     write(*,'("Initial time increment",es12.4)') dtime
@@ -1358,11 +1393,11 @@ subroutine read_step(filename)
    write(*,'("  Axis for prescribed displacement: ",i2)') bc_axis
    read(line(i+j+1:len(line)),*) bc_value
    write(*,'("  Value for prescribed displacement: ",f12.4)') bc_value
-   do iset=1,size(nset_names)
+   do iset=1,nnset
     if (bc_name.eq.nset_names(iset)) then
-      write(*,*) "found set",iset
-     do inode=1,nset_sizes(iset)
-      jnode=nset_nodes(iset,inode)
+     write(*,*) "found set",iset
+     do inode=nset_start(iset),nset_end(iset)
+      jnode=nset_nodes(inode)
 !       write(*,*) jnode
       idof=3*jnode+bc_axis-3
       bc_type(idof)=1
@@ -1381,11 +1416,11 @@ subroutine read_step(filename)
    write(*,'("  Axis for prescribed force: ",i2)') bc_axis
    read(line(i+j+1:len(line)),*) bc_value
    write(*,'("  Value for prescribed force: ",f12.4)') bc_value
-   do iset=1,size(nset_names)
+   do iset=1,nnset
     if (bc_name.eq.nset_names(iset)) then
-      write(*,*) "found set",iset
-     do inode=1,nset_sizes(iset)
-      jnode=nset_nodes(iset,inode)
+     write(*,*) "found set",iset
+     do inode=nset_start(iset),nset_end(iset)
+      jnode=nset_nodes(inode)
 !       write(*,*) jnode
       idof=3*jnode+bc_axis-3
       bc_type(idof)=2
@@ -1395,92 +1430,186 @@ subroutine read_step(filename)
    enddo
    reading_force=.false.
   endif
+  if (reading_pressure) then
+   i=index(line,",")
+   bc_name=line(1:i-1)
+   write(*,'("  Elset for prescribed pressure: ",a)') trim(bc_name)
+   j=index(line(i+1:len(line)),",")
+   read(line(i+1:i+j),*) bc_axis
+   write(*,'("  Axis for prescribed pressure: ",i2)') bc_axis
+   read(line(i+j+1:len(line)),*) bc_value
+   write(*,'("  Value for prescribed pressure: ",f12.4)') bc_value
+   do iset=1,nelset
+    if (bc_name.eq.elset_names(iset)) then
+     write(*,*) "found set",iset
+     do ielem=elset_start(iset),elset_end(iset)
+      jelem=elset_elem(ielem)
+      do inode=1,nnode_per_element2d
+       x(inode)=coords(1,connect2d(inode,jelem))
+       y(inode)=coords(2,connect2d(inode,jelem))
+       z(inode)=coords(3,connect2d(inode,jelem))
+      enddo
+      select case(nntg_per_element2d)
+       case(1)
+        call triangleT3(x,y,z,interpolation2D(:,:),wght2D(:),area)
+       case(3)
+        call triangleT6(x,y,z,interpolation2D(:,:),wght2D(:),area)
+       case(4)
+        call quadrangleQ4(x,y,z,interpolation2D(:,:),wght2D(:),area)
+       case default
+        write(*,'("Unknown type of 2D element. Program will stop !")')
+        stop
+      end select
+      do inode=1,nnode_per_element2d
+       jnode=connect2d(inode,jelem)
+       idof=3*jnode+bc_axis-3
+       bc_type(idof)=2
+       do intg=1,nntg_per_element2d
+        bc_val(idof)=bc_val(idof)-interpolation2D(inode,intg)*wght2D(intg)*bc_value
+       enddo
+      enddo
+     enddo
+    endif
+   enddo
+   reading_pressure=.false.
+  endif
  enddo
 100 continue
  close(unit=10)
-
+ deallocate(interpolation2D,wght2D,x,y,z)
 end subroutine
 ! *******************************************************************
 ! *** subroutine read_inp
 ! *******************************************************************
-subroutine read_inp(filename,coords,conn,nnode,nelem,nset_names,nset_sizes,nset_nodes)
+subroutine read_inp(filename)
  implicit none
  character(len=*), intent(in) :: filename
- integer, intent(out) :: nnode, nelem
- real(8), allocatable, intent(out) :: coords(:,:)
- integer, allocatable, intent(out) :: conn(:,:)
- integer :: max_nodes,max_nset_size,max_nsets
+ integer :: max_nodes,max_elem
  real(8) :: x,y,z
  character(len=256) :: line
- character(len=64), allocatable :: nset_names(:)
- integer, allocatable :: nset_sizes(:),nset_nodes(:,:)
  integer :: i, j, k, id, n(10)
- integer :: current_nset, node_id, ierr
- logical :: reading_nodes, reading_elems, reading_nset
+ integer :: node_id, ierr
+ logical :: reading_node,reading_elem2d,reading_elem3d,reading_nset,reading_elset,found
  character(len=64) :: temp_name
 
  nnode=0
- nelem=0
- max_nsets=0
- max_nset_size=0
- reading_nodes=.false.
- reading_elems=.false.
+ nelem2d=0
+ nelem3d=0
+ nnset=0
+ max_nodes=0
+ nelset=0
+ max_elem=0
+ reading_node=.false.
+ reading_elem2d=.false.
+ reading_elem3d=.false.
  reading_nset=.false.
+ reading_elset=.false.
  open(unit=10, file=filename, status='old')
  do
   read(10,'(A)', end=100) line
 ! Détection des sections
   if (index(line, "*NODE") > 0) then
-   reading_nodes = .true.
-   reading_elems = .false.
+   reading_node = .true.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
    reading_nset  = .false.
+   reading_elset  = .false.
+   cycle
+  else if (index(line, "*ELEMENT") > 0 .and. index(line, "CPS3") > 0) then
+   reading_node = .false.
+   reading_elem2d = .true.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .false.
+   nnode_per_element2d=3
+   cycle
+  else if (index(line, "*ELEMENT") > 0 .and. index(line, "CPS4") > 0) then
+   reading_node = .false.
+   reading_elem2d = .true.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .false.
+   nnode_per_element2d=4
+   cycle
+  else if (index(line, "*ELEMENT") > 0 .and. index(line, "CPS6") > 0) then
+   reading_node = .false.
+   reading_elem2d = .true.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .false.
+   nnode_per_element2d=6
    cycle
   else if (index(line, "*ELEMENT") > 0 .and. index(line, "C3D8") > 0) then
-   reading_nodes = .false.
-   reading_elems = .true.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .true.
    reading_nset  = .false.
-   nnode_per_element=8
+   reading_elset  = .false.
+   nnode_per_element3d=8
    cycle
   else if (index(line, "*ELEMENT") > 0 .and. index(line, "C3D4") > 0) then
-   reading_nodes = .false.
-   reading_elems = .true.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .true.
    reading_nset  = .false.
-   nnode_per_element=4
+   reading_elset  = .false.
+   nnode_per_element3d=4
    cycle
   else if (index(line, "*ELEMENT") > 0 .and. index(line, "C3D10") > 0) then
-   reading_nodes = .false.
-   reading_elems = .true.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .true.
    reading_nset  = .false.
-   nnode_per_element=10
+   reading_elset  = .false.
+   nnode_per_element3d=10
    cycle
   else if (index(line, "*NSET") > 0) then
-   reading_nodes = .false.
-   reading_elems = .false.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
    reading_nset  = .true.
+   reading_elset  = .false.
 ! Extraire le nom du NSET
-   call parse_nset_name(line, temp_name)
-   max_nsets = max_nsets + 1
-   max_nodes = 0
+   call parse_nset_name(line,"NSET=",temp_name)
+   nnset = nnset + 1
+   cycle
+  else if (index(line, "*ELSET") > 0) then
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .true.
+! Extraire le nom du NSET
+   call parse_nset_name(line,"ELSET=",temp_name)
+   nelset = nelset + 1
    cycle
   else if (index(line, "*") == 1) then
-   reading_nodes = .false.
-   reading_elems = .false.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
    reading_nset  = .false.
+   reading_elset  = .false.
    cycle
   end if
 ! Lecture des données
-  if (reading_nodes) then
+  if (reading_node) then
    write(*,'("READING NODE")')
    read(line,*,iostat=ierr) id,x,y,z
    if (ierr.eq.0) then
     nnode=nnode+1
    endif
    write(*,'("READING NODE",i4)') id
-  else if (reading_elems) then
+  else if (reading_elem2d) then
    write(*,'("READING ELEMS")')
-   read(line,*,iostat=ierr) id, (n(inode),inode=1,nnode_per_element)
+   read(line,*,iostat=ierr) id, (n(inode),inode=1,nnode_per_element2d)
    if (ierr.eq.0) then
-    nelem=nelem+1
+    nelem2d=nelem2d+1
+   endif
+  else if (reading_elem3d) then
+   write(*,'("READING ELEMS")')
+   read(line,*,iostat=ierr) id, (n(inode),inode=1,nnode_per_element3d)
+   if (ierr.eq.0) then
+    nelem3d=nelem3d+1
    endif
   else if (reading_nset) then
    write(*,'("READING NSET")')
@@ -1490,76 +1619,145 @@ subroutine read_inp(filename,coords,conn,nnode,nelem,nset_names,nset_sizes,nset_
     read(line,*) node_id
     max_nodes = max_nodes + 1
    end do
-   max_nset_size=max(max_nset_size,max_nodes)
-   write(*,*) max_nsets,max_nodes
+   write(*,*) nnset,max_nodes
+  else if (reading_elset) then
+   write(*,'("READING ELSET")')
+   write(*,'(i4)') count_commas(line)
+   write(*,'("READING LINE in ELSET")')
+   do i = 1, count_commas(line)
+    read(line,*) id
+    max_elem = max_elem + 1
+   end do
+   write(*,*) nelset,max_elem
   end if
  end do
 100 continue
  close(10)
  print *, "Number of nodes:", nnode
- print *, "Number of elements:", nelem
- print *, "Number of nodes per element:", nnode_per_element
- print *, "Number of NSETs:", max_nsets
- print *, "Max number of nodes / NSET:", max_nset_size
+ print *, "Number of 2D elements:", nelem2d
+ print *, "Number of 3D elements:", nelem3d
+ print *, "Number of nodes per element:", nnode_per_element3d
+ print *, "Number of NSETs:", nnset
+ print *, "Total number of nodes in NSETs:", max_nodes
+ print *, "Number of ELSETs:", nelset
+ print *, "Total number of elements in ELSETs:", max_elem
  allocate(coords(3, nnode))
- allocate(conn(nnode_per_element, nelem))
- allocate(nset_sizes(max_nsets),nset_nodes(max_nsets, max_nset_size),nset_names(max_nsets))
+ allocate(connect3d(nnode_per_element3d,nelem3d),connect2d(nnode_per_element2d,nelem2d))
+ allocate(idelem3d(nelem3d),idelem2d(nelem2d))
+ allocate(nset_start(nnset),nset_end(nnset),nset_nodes(max_nodes),nset_names(nnset))
+ allocate(elset_start(nelset),elset_end(nelset),elset_elem(max_elem),elset_names(nelset))
  nnode=0
- nelem=0
- current_nset=0
- nset_sizes=0
- reading_nodes=.false.
- reading_elems=.false.
+ nelem2d=0
+ nelem3d=0
+ nnset=0
+ max_nodes=0
+ nelset=0
+ max_elem=0
+ reading_node=.false.
+ reading_elem2d = .false.
+ reading_elem3d=.false.
  reading_nset=.false.
+ reading_elset=.false.
  open(unit=10, file=filename, status='old')
  do
   read(10,'(A)', end=200) line
 ! Détection des sections
   if (index(line, "*NODE") > 0) then
    write(*,'("NODES")')
-   reading_nodes = .true.
-   reading_elems = .false.
+   reading_node = .true.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
    reading_nset  = .false.
+   reading_elset  = .false.
+   cycle
+  else if (index(line, "*ELEMENT") > 0 .and. index(line, "CPS3") > 0) then
+   reading_node = .false.
+   reading_elem2d = .true.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .false.
+   nnode_per_element2d=3
+   nntg_per_element2d=1
+   cycle
+  else if (index(line, "*ELEMENT") > 0 .and. index(line, "CPS4") > 0) then
+   reading_node = .false.
+   reading_elem2d = .true.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .false.
+   nnode_per_element2d=4
+   nntg_per_element2d=4
+   cycle
+  else if (index(line, "*ELEMENT") > 0 .and. index(line, "CPS6") > 0) then
+   reading_node = .false.
+   reading_elem2d = .true.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .false.
+   nnode_per_element2d=6
+   nntg_per_element2d=3
    cycle
   else if (index(line, "*ELEMENT") > 0 .and. index(line, "C3D8") > 0) then
-   reading_nodes = .false.
-   reading_elems = .true.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .true.
    reading_nset  = .false.
-   nnode_per_element=8
-   nntg_per_element=8
+   nnode_per_element3d=8
+   nntg_per_element3d=8
    cycle
   else if (index(line, "*ELEMENT") > 0 .and. index(line, "C3D4") > 0) then
-   reading_nodes = .false.
-   reading_elems = .true.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .true.
    reading_nset  = .false.
-   nnode_per_element=4
-   nntg_per_element=1
+   reading_elset  = .false.
+   nnode_per_element3d=4
+   nntg_per_element3d=1
    cycle
   else if (index(line, "*ELEMENT") > 0 .and. index(line, "C3D10") > 0) then
-   reading_nodes = .false.
-   reading_elems = .true.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .true.
    reading_nset  = .false.
-   nnode_per_element=10
-   nntg_per_element=4
+   reading_elset  = .false.
+   nnode_per_element3d=10
+   nntg_per_element3d=4
    cycle
   else if (index(line, "*NSET") > 0) then
    write(*,'("NSET")')
-   reading_nodes = .false.
-   reading_elems = .false.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
    reading_nset  = .true.
+   reading_elset  = .false.
 ! Extraire le nom du NSET
-   call parse_nset_name(line, temp_name)
-   current_nset = current_nset + 1
-   nset_names(current_nset) = temp_name
+   call parse_nset_name(line,"NSET=",temp_name)
+   nnset = nnset + 1
+   nset_names(nnset) = temp_name
+   nset_start(nnset)=max_nodes+1
+   cycle
+  else if (index(line, "*ELSET") > 0) then
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
+   reading_nset  = .false.
+   reading_elset  = .true.
+! Extraire le nom du ELSET
+   call parse_nset_name(line,"ELSET=",temp_name)
+   nelset = nelset + 1
+   elset_names(nelset) = temp_name
+   elset_start(nelset) = max_elem+1
    cycle
   else if (index(line, "*") == 1) then
-   reading_nodes = .false.
-   reading_elems = .false.
+   reading_node = .false.
+   reading_elem2d = .false.
+   reading_elem3d = .false.
    reading_nset  = .false.
+   reading_elset  = .false.
    cycle
   end if
 ! Lecture des données
-  if (reading_nodes) then
+  if (reading_node) then
    write(*,'("READING NODE")')
    read(line,*,iostat=ierr) id,x,y,z
    if (ierr.eq.0.and.id.eq.(nnode+1)) then
@@ -1572,13 +1770,26 @@ subroutine read_inp(filename,coords,conn,nnode,nelem,nset_names,nset_sizes,nset_
 !     stop
    endif
    write(*,'("READING NODE",i4)') id
-  else if (reading_elems) then
+  else if (reading_elem2d) then
    write(*,'("READING ELEMS")')
-   read(line,*,iostat=ierr) id, (n(inode),inode=1,nnode_per_element)
+   read(line,*,iostat=ierr) id, (n(inode),inode=1,nnode_per_element2d)
    if (ierr.eq.0) then
-    nelem=nelem+1
-    do inode=1,nnode_per_element
-     conn(inode,nelem)=n(inode)
+    nelem2d=nelem2d+1
+    idelem2d(nelem2d)=id
+    do inode=1,nnode_per_element2d
+     connect2d(inode,nelem2d)=n(inode)
+    enddo
+   else
+    write(*,'("ERROR WHEN READING ELEMENT ",i6," NODES")') id
+   endif
+  else if (reading_elem3d) then
+   write(*,'("READING ELEMS")')
+   read(line,*,iostat=ierr) id,(n(inode),inode=1,nnode_per_element3d)
+   if (ierr.eq.0) then
+    nelem3d=nelem3d+1
+    idelem3d(nelem3d)=id
+    do inode=1,nnode_per_element3d
+     connect3d(inode,nelem3d)=n(inode)
     enddo
    else
     write(*,'("ERROR WHEN READING ELEMENT ",i6," NODES")') id
@@ -1589,12 +1800,25 @@ subroutine read_inp(filename,coords,conn,nnode,nelem,nset_names,nset_sizes,nset_
    write(*,'("READING LINE in NSET")')
    k=1
    do i = 1, count_commas(line)
+    max_nodes = max_nodes + 1
     j=index(line, ",")
     read(line(k:j-1),*) node_id
     line(j:j)=" "
     k=j+1
-    nset_sizes(current_nset)=nset_sizes(current_nset)+1
-    nset_nodes(current_nset,nset_sizes(current_nset))=node_id
+    nset_nodes(max_nodes)=node_id
+   end do
+  else if (reading_elset) then
+   write(*,'("READING ELSET")')
+   write(*,'(i4)') count_commas(line)
+   write(*,'("READING LINE in ELSET")')
+   k=1
+   do i = 1, count_commas(line)
+    max_elem = max_elem + 1
+    j=index(line, ",")
+    read(line(k:j-1),*) id
+    line(j:j)=" "
+    k=j+1
+    elset_elem(max_elem)=id
    end do
   end if
  end do
@@ -1606,14 +1830,59 @@ subroutine read_inp(filename,coords,conn,nnode,nelem,nset_names,nset_sizes,nset_
   write(*,'("Node",i4," Coords",3es12.4)') id,coords(:,id)
  enddo
 
- do id=1,nelem
-  write(*,'("Element",i4," Nodes",6i4)') id,conn(:,id)
+ do id=1,nelem2d
+  write(*,'("Element",i6," Nodes",6i6)') idelem2d(id),connect2d(:,id)
  enddo
 
- do id=1,current_nset
-  write(*,'("Nset",i4," Size",i4)') id,nset_sizes(id)
-  do i=1,nset_sizes(id)
-   write(*,'("    Node:",i4)') nset_nodes(id,i)
+ do id=1,nelem3d
+  write(*,'("Element",i6," Nodes",10i6)') idelem3d(id),connect3d(:,id)
+ enddo
+
+
+ do id=1,nnset-1
+  nset_end(id)=nset_start(id+1)-1
+ enddo
+ nset_end(nnset)=max_nodes
+
+ do id=1,nelset-1
+  elset_end(id)=elset_start(id+1)-1
+ enddo
+ elset_end(nelset)=max_elem
+
+ do id=1,nnset
+  write(*,'(a)') nset_names(id)
+  do i=nset_start(id),nset_end(id)
+   write(*,'("    Node:",i6)') nset_nodes(i)
+  enddo
+ enddo
+
+ do id=1,nelset
+  write(*,'(a)') elset_names(id)
+  do i=elset_start(id),elset_end(id)
+   write(*,'("    Element:",i6)') elset_elem(i)
+   found=.true.
+   ielem=0
+   do while (found.and.ielem.lt.nelem2d)
+    ielem=ielem+1
+    if (elset_elem(i).eq.idelem2d(ielem)) then
+     found=.false.
+     write(*,'("    ...corresponding 2d element!",i6)') ielem
+     elset_elem(i)=ielem
+    endif
+   enddo
+   ielem=0
+   do while (found.and.ielem.lt.nelem3d)
+    ielem=ielem+1
+    if (elset_elem(i).eq.idelem3d(ielem)) then
+     found=.false.
+     write(*,'("    ...corresponding 3d element!",i6)') ielem
+     elset_elem(i)=ielem
+    endif
+   enddo
+   if (found) then
+    write(*,'("Cannot find corresponding element in elset ",a)') elset_names(id)
+    stop
+   endif
   enddo
  enddo
 
@@ -1621,14 +1890,14 @@ end subroutine
 ! *******************************************************************
 ! *** subroutine parse_nset_name
 ! *******************************************************************
-subroutine parse_nset_name(line, name)
- character(len=*), intent(in) :: line
+subroutine parse_nset_name(line, tag, name)
+ character(len=*), intent(in) :: line,tag
  character(len=*), intent(out) :: name
  integer :: p1
  name = ""
- p1 = index(line, "NSET=")
+ p1 = index(line, tag)
  if (p1 > 0) then
-  read(line(p1+5:), '(A)') name
+  read(line(p1+len(tag):), '(A)') name
   p1 = index(name, ",")
   if (p1 > 0) name = name(:p1-1)
  end if
@@ -1813,13 +2082,13 @@ subroutine plasticity(nprop,nstat,props,time_old,time_new,defgrad_old,defgrad_ne
  real(8) :: equivalent_old,equivalent_new
  real(8) :: rate_old,rate_new
  type(Tensor4ss) :: derivative_new,tangent2_new,auxiliary_new,tangent_new,stiffness
- real(8) :: bulk,shear,threshold,hardening,coefficient
+ real(8) :: bulk,shear,threshold,hardening,coefficient,crit
  integer :: ij,iter
  real(8), parameter :: toler=1.d-2,small=1.d-8
  integer, parameter :: iter_max=100
  type(Tensor2s) :: dstress
 
- if (nstat.lt.7.or.nprop.lt.5) then
+ if (nstat.lt.7.or.nprop.lt.6) then
   write(*,'("ERROR: INSUFFICENT NUMBER OF STATE VARIABLES AND/OR MATERIAL PROPERTIES")')
   stop
  endif
@@ -1829,6 +2098,7 @@ subroutine plasticity(nprop,nstat,props,time_old,time_new,defgrad_old,defgrad_ne
  threshold=props(3)
  hardening=props(4)
  coefficient=props(5)
+ crit=props(6)
  stiffness=((3.d0*bulk)*ps4ss)+((2.d0*shear)*pd4ss)
 ! *** calculate initial Cauchy-Green tensor
  cauchy_old=sym(trsp(defgrad_old).dot.defgrad_old)
@@ -1892,9 +2162,11 @@ subroutine plasticity(nprop,nstat,props,time_old,time_new,defgrad_old,defgrad_ne
 !  write(*,'("cumulated_new",6es12.4)') cumulated_new
 !  write(*,'(20es12.4)') strain_new%val(:),
 ! *** calculate final dissipated energy density
- dissipatedenergy_new=dissipatedenergy_old+0.5d0*((stress_old+stress_new).ddot.(plastic_strain_new-plastic_strain_old))-(0.5d0*(yield_old+yield_new)-threshold)*(cumulated_new-cumulated_old)
+!  dissipatedenergy_new=dissipatedenergy_old+0.5d0*((stress_old+stress_new).ddot.(plastic_strain_new-plastic_strain_old))-(0.5d0*(yield_old+yield_new)-threshold)*(cumulated_new-cumulated_old)
+ dissipatedenergy_new=dissipatedenergy_old+0.5d0*((stress_old+stress_new).ddot.(plastic_strain_new-plastic_strain_old))-hardening*((cumulated_new*crit)/(cumulated_new+crit))**coefficient**(crit/(cumulated_new+crit))**2.d0*(cumulated_new-cumulated_old)
 ! *** calculate final internal energy density
- internalenergy_new=0.5d0*(stress_new.ddot.elastic_strain_new)+hardening/(coefficient+1.d0)*cumulated_new**(coefficient+1.d0)
+!  internalenergy_new=0.5d0*(stress_new.ddot.elastic_strain_new)+hardening/(coefficient+1.d0)*cumulated_new**(coefficient+1.d0)
+ internalenergy_new=0.5d0*(stress_new.ddot.elastic_strain_new)+hardening/(coefficient+1.d0)*((cumulated_new*crit)/(cumulated_new+crit))**(coefficient+1.d0)
 !  write(*,'("energy_new",6es12.4)') dissipatedenergy_new,internalenergy_new
 ! *** calculate PK2 stress tensor
  call isotropic(func="log",TA=cauchy_new,TB=stress_new,dTCdTA=derivative_new,TBddTCddTA=auxiliary_new)
