@@ -70,9 +70,9 @@ Surface Loop(1) = {1, 2, 3, 4, 5, 6, 7, 8};
 Volume(1) = {1};
 
 Physical Surface("ZSYM") = {1};
-Physical Surface("XSYM") = {3};
+Physical Surface("XDSP") = {3};
 Physical Surface("YSYM") = {7};
-Physical Surface("XDSP") = {4};
+Physical Surface("XSYM") = {4};
 
 
 
