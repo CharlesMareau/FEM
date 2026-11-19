@@ -16,12 +16,12 @@ program fem_main
 ! Variables pour assemblage
  integer :: i,j,k,l,ij,kl,idof,jdof,kdof,iddl,jddl,kddl,ielem,inode,jnode,knode,iter,istp,unit,istat,intg,jntg,igss,jgss,iset,nstat,nprop
  integer, allocatable :: bc_type(:)
- real(8), allocatable :: bc_val(:)
+ real(8), allocatable :: bc_val(:,:)
  real(8), allocatable :: stiffness(:),force(:),increment(:),interpolation(:,:),gradient(:,:,:),volume(:),wght(:)
  real(8), allocatable :: position_new(:),position_old(:)
  type(Tensor2), allocatable :: defgrad_new(:),defgrad_old(:)
  type(Tensor2), allocatable :: stress_new(:),stress_old(:)
- type(Tensor4), allocatable :: modulus_new(:),modulus_old(:)
+ type(Tensor4), allocatable :: modulus_new(:)
  real(8), allocatable :: state_new(:,:),state_old(:,:)
  real(8), allocatable :: internalenergy_new(:),internalenergy_old(:)
  real(8), allocatable :: dissipatedenergy_new(:),dissipatedenergy_old(:)
@@ -73,7 +73,7 @@ program fem_main
  allocate(position_new(ndof),position_old(ndof))
  allocate(defgrad_new(nntg),defgrad_old(nntg))
  allocate(stress_new(nntg),stress_old(nntg))
- allocate(modulus_new(nntg),modulus_old(nntg))
+ allocate(modulus_new(nntg))
  allocate(state_new(nstat,nntg),state_old(nstat,nntg))
  allocate(dissipatedenergy_new(nntg),dissipatedenergy_old(nntg))
  allocate(internalenergy_new(nntg),internalenergy_old(nntg))
@@ -151,7 +151,7 @@ program fem_main
  iparm(17) = -1            ! pas de réordonnancement METIS
  iparm(34) = 0             ! utiliser zero-based indexing → =1 pour C, =0 pour Fortran
 ! *** finds nodes with prescribed BC
- allocate(bc_type(ndof),bc_val(ndof))
+ allocate(bc_type(ndof),bc_val(2,ndof))
  call read_step(fileproc)
  time_old=0.d0
 ! *** saves initial state
@@ -176,10 +176,12 @@ program fem_main
   progress=progress+dtime/duration
 ! *** applies boundary condition
   !$omp parallel default(shared)
-  !$omp do private(idof) schedule(static)
+  !$omp do private(idof,i,inode) schedule(static)
   do idof=1,ndof
    if (bc_type(idof).eq.1) then
-    position_new(idof)=position_old(idof)+bc_val(idof)*dtime/duration
+    inode=(idof+2)/3
+    i=idof-3*inode+3
+    position_new(idof)=coords(i,inode)+bc_val(1,idof)+(bc_val(2,idof)-bc_val(1,idof))*progress
    endif
   enddo
   !$omp enddo
@@ -305,7 +307,7 @@ program fem_main
     endif
     if (bc_type(idof).eq.2) then
      !$omp atomic update
-     force(idof)=force(idof)-bc_val(idof)*progress
+     force(idof)=force(idof)-bc_val(1,idof)-(bc_val(2,idof)-bc_val(1,idof))*progress
     endif
    enddo
    !$omp end do
@@ -459,16 +461,16 @@ end subroutine
 subroutine export_rct(iopt)
  implicit none
  integer :: iset,iopt
- real(8) :: reaction(3),moment(3)
+ real(8) :: reaction(3),moment(3),disp(3)
  select case(iopt)
  case(0)
   open(unit=20, file="reaction.out", status="replace", action="write")
   write(20,'(" TIME")',advance='no')
-  do iset=1,size(nset_names)
-   if (iset.eq.size(nset_names)) then
-    write(20,'(" RF1_",a," RF2_",a," RF3_",a," M1_",a," M2_",a," M3_",a)',advance='yes') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
+  do iset=1,nnset
+   if (iset.eq.nnset) then
+    write(20,'(" RF1_",a," RF2_",a," RF3_",a," U1_",a," U2_",a," U3_",a)',advance='yes') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
    else
-    write(20,'(" RF1_",a," RF2_",a," RF3_",a," M1_",a," M2_",a," M3_",a)',advance='no') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
+    write(20,'(" RF1_",a," RF2_",a," RF3_",a," U1_",a," U2_",a," U3_",a)',advance='no') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
    endif
   enddo
  case(1)
@@ -497,10 +499,10 @@ subroutine export_rct(iopt)
   !$omp end parallel
   do idof=1,ndof
    if (bc_type(idof).eq.2) then
-    force(idof)=force(idof)-bc_val(idof)*progress
+    force(idof)=force(idof)-bc_val(1,idof)-(bc_val(2,idof)-bc_val(1,idof))*progress
    endif
   enddo
-  do iset=1,size(nset_names)
+  do iset=1,nnset
 !    write(*,'(a)') nset_names(iset)
    reaction(1)=0.d0
    reaction(2)=0.d0
@@ -508,11 +510,17 @@ subroutine export_rct(iopt)
    moment(1)=0.d0
    moment(2)=0.d0
    moment(3)=0.d0
+   disp(1)=0.d0
+   disp(2)=0.d0
+   disp(3)=0.d0
    do inode=nset_start(iset),nset_end(iset)
     jnode=nset_nodes(inode)
     idof=3*jnode-2
     jdof=3*jnode-1
     kdof=3*jnode
+    disp(1)=disp(1)+position_old(idof)-coords(1,jnode)
+    disp(2)=disp(2)+position_old(jdof)-coords(2,jnode)
+    disp(3)=disp(3)+position_old(kdof)-coords(3,jnode)
     if (bc_type(idof).eq.1) then
 !      write(*,'("Node",i6," DOF:",i6," Reaction force:",es12.4)') jnode,idof,force(idof)
      reaction(1)=reaction(1)+force(idof)
@@ -525,14 +533,17 @@ subroutine export_rct(iopt)
 !      write(*,'("Node",i6," DOF:",i6," Reaction force:",es12.4)') jnode,idof,force(idof)
      reaction(3)=reaction(3)+force(kdof)
     endif
-    moment(1)=moment(1)+force(kdof)*position_new(jdof)-force(jdof)*position_new(kdof)
-    moment(2)=moment(2)+force(idof)*position_new(kdof)-force(kdof)*position_new(idof)
-    moment(3)=moment(3)+force(jdof)*position_new(idof)-force(idof)*position_new(jdof)
+    moment(1)=moment(1)+force(kdof)*position_old(jdof)-force(jdof)*position_old(kdof)
+    moment(2)=moment(2)+force(idof)*position_old(kdof)-force(kdof)*position_old(idof)
+    moment(3)=moment(3)+force(jdof)*position_old(idof)-force(idof)*position_old(jdof)
    enddo
-   if (iset.eq.size(nset_names)) then
-    write(20,'(6es12.4)',advance='yes') reaction(:),moment(:)
+   disp(1)=disp(1)/real(nset_end(iset)-nset_start(iset)+1,8)
+   disp(2)=disp(2)/real(nset_end(iset)-nset_start(iset)+1,8)
+   disp(3)=disp(3)/real(nset_end(iset)-nset_start(iset)+1,8)
+   if (iset.eq.nnset) then
+    write(20,'(6es12.4)',advance='yes') reaction(:),disp(:)
    else
-    write(20,'(6es12.4)',advance='no') reaction(:),moment(:)
+    write(20,'(6es12.4)',advance='no') reaction(:),disp(:)
    endif
   enddo
  case(2)
@@ -1335,9 +1346,9 @@ subroutine read_step(filename)
  character(len=*), intent(in) :: filename
  character(len=256) :: line
  logical :: reading_step,reading_disp,reading_force,reading_pressure
- integer :: i,j,nbc,iset,inode,jnode,bc_axis,jelem
+ integer :: i,j,k,nbc,iset,inode,jnode,bc_axis,jelem
  character(len=64) :: bc_name
- real(8) :: bc_value
+ real(8) :: bc_value1,bc_value2
  real(8) :: area
  real(8), allocatable :: interpolation2D(:,:),wght2D(:)
 
@@ -1348,7 +1359,7 @@ subroutine read_step(filename)
  reading_force=.false.
  reading_pressure=.false.
  bc_type(:)=0
- bc_val(:)=0.d0
+ bc_val(:,:)=0.d0
  open(unit=10, file=filename, status='old')
  do
   read(10,'(A)', end=100) line
@@ -1357,42 +1368,44 @@ subroutine read_step(filename)
    reading_step=.true.
    cycle
   endif
+  if (index(line, "*DISPLACEMENT") > 0) then
+   reading_disp=.true.
+   reading_force=.false.
+   reading_pressure=.false.
+   cycle
+  endif
+  if (index(line, "*FORCE") > 0) then
+   reading_disp=.false.
+   reading_force=.true.
+   reading_pressure=.false.
+   cycle
+  endif
+  if (index(line, "*PRESSURE") > 0) then
+   reading_disp=.false.
+   reading_force=.false.
+   reading_pressure=.true.
+   cycle
+  endif
   if (reading_step) then
-   if (index(line, "*DISPLACEMENT") > 0) then
-    reading_disp=.true.
-    reading_force=.false.
-    reading_pressure=.false.
-    cycle
-   endif
-   if (index(line, "*FORCE") > 0) then
-    reading_disp=.false.
-    reading_force=.true.
-    reading_pressure=.false.
-    cycle
-   endif
-   if (index(line, "*PRESSURE") > 0) then
-    reading_disp=.false.
-    reading_force=.false.
-    reading_pressure=.true.
-    cycle
-   endif
-   if (not(reading_disp.or.reading_force.or.reading_pressure)) then
-    read(line,*) duration,dtime,dtime_min,dtime_max
-    write(*,'("Duration",es12.4)') duration
-    write(*,'("Initial time increment",es12.4)') dtime
-    write(*,'("Minimal time increment",es12.4)') dtime_min
-    write(*,'("Maximal time increment",es12.4)') dtime_max
-   endif
+   read(line,*) duration,dtime,dtime_min,dtime_max
+   write(*,'("Duration",es12.4)') duration
+   write(*,'("Initial time increment",es12.4)') dtime
+   write(*,'("Minimal time increment",es12.4)') dtime_min
+   write(*,'("Maximal time increment",es12.4)') dtime_max
+   reading_step=.false.
   endif
   if (reading_disp) then
    i=index(line,",")
+   j=index(line(i+1:len(line)),",")
+   k=index(line(i+j+1:len(line)),",")
    bc_name=line(1:i-1)
    write(*,'("  Nset for prescribed displacement: ",a)') trim(bc_name)
-   j=index(line(i+1:len(line)),",")
    read(line(i+1:i+j),*) bc_axis
    write(*,'("  Axis for prescribed displacement: ",i2)') bc_axis
-   read(line(i+j+1:len(line)),*) bc_value
-   write(*,'("  Value for prescribed displacement: ",f12.4)') bc_value
+   read(line(i+j+1:i+j+k),*) bc_value1
+   write(*,'("  Initial value for prescribed displacement: ",f12.4)') bc_value1
+   read(line(i+j+k+1:len(line)),*) bc_value2
+   write(*,'("  Final value for prescribed displacement: ",f12.4)') bc_value2
    do iset=1,nnset
     if (bc_name.eq.nset_names(iset)) then
      write(*,*) "found set",iset
@@ -1401,7 +1414,8 @@ subroutine read_step(filename)
 !       write(*,*) jnode
       idof=3*jnode+bc_axis-3
       bc_type(idof)=1
-      bc_val(idof)=bc_value
+      bc_val(1,idof)=bc_value1
+      bc_val(2,idof)=bc_value2
      enddo
     endif
    enddo
@@ -1409,13 +1423,17 @@ subroutine read_step(filename)
   endif
   if (reading_force) then
    i=index(line,",")
+   j=index(line(i+1:len(line)),",")
+   k=index(line(i+j+1:len(line)),",")
    bc_name=line(1:i-1)
    write(*,'("  Nset for prescribed force: ",a)') trim(bc_name)
    j=index(line(i+1:len(line)),",")
    read(line(i+1:i+j),*) bc_axis
    write(*,'("  Axis for prescribed force: ",i2)') bc_axis
-   read(line(i+j+1:len(line)),*) bc_value
-   write(*,'("  Value for prescribed force: ",f12.4)') bc_value
+   read(line(i+j+1:i+j+k),*) bc_value1
+   write(*,'("  Initial value for prescribed force: ",f12.4)') bc_value1
+   read(line(i+j+k+1:len(line)),*) bc_value2
+   write(*,'("  Final value for prescribed force: ",f12.4)') bc_value2
    do iset=1,nnset
     if (bc_name.eq.nset_names(iset)) then
      write(*,*) "found set",iset
@@ -1424,7 +1442,8 @@ subroutine read_step(filename)
 !       write(*,*) jnode
       idof=3*jnode+bc_axis-3
       bc_type(idof)=2
-      bc_val(idof)=bc_value
+      bc_val(1,idof)=bc_value1
+      bc_val(2,idof)=bc_value2
      enddo
     endif
    enddo
@@ -1432,13 +1451,17 @@ subroutine read_step(filename)
   endif
   if (reading_pressure) then
    i=index(line,",")
+   j=index(line(i+1:len(line)),",")
+   k=index(line(i+j+1:len(line)),",")
    bc_name=line(1:i-1)
    write(*,'("  Elset for prescribed pressure: ",a)') trim(bc_name)
    j=index(line(i+1:len(line)),",")
    read(line(i+1:i+j),*) bc_axis
    write(*,'("  Axis for prescribed pressure: ",i2)') bc_axis
-   read(line(i+j+1:len(line)),*) bc_value
-   write(*,'("  Value for prescribed pressure: ",f12.4)') bc_value
+   read(line(i+j+1:i+j+k),*) bc_value1
+   write(*,'("  Initial value for prescribed pressure: ",f12.4)') bc_value1
+   read(line(i+j+k+1:len(line)),*) bc_value2
+   write(*,'("  Final value for prescribed pressure: ",f12.4)') bc_value2
    do iset=1,nelset
     if (bc_name.eq.elset_names(iset)) then
      write(*,*) "found set",iset
@@ -1465,7 +1488,8 @@ subroutine read_step(filename)
        idof=3*jnode+bc_axis-3
        bc_type(idof)=2
        do intg=1,nntg_per_element2d
-        bc_val(idof)=bc_val(idof)-interpolation2D(inode,intg)*wght2D(intg)*bc_value
+        bc_val(1,idof)=bc_val(1,idof)-interpolation2D(inode,intg)*wght2D(intg)*bc_value1
+        bc_val(2,idof)=bc_val(2,idof)-interpolation2D(inode,intg)*wght2D(intg)*bc_value2
        enddo
       enddo
      enddo
@@ -1937,7 +1961,7 @@ subroutine modulus(intg)
    defgrad_trl=defgrad_new(intg)
    defgrad_trl%val(k,l)=defgrad_trl%val(k,l)+small
    call plasticity(nprop,nstat,props,time_old,time_new,defgrad_old(intg),defgrad_trl,stress_old(intg),stress_trl,state_old(:,intg),state_trl(:) &
-                  ,internalenergy_old(intg),internalenergy_new(intg),dissipatedenergy_old(intg),dissipatedenergy_new(intg),modulus_old(intg))
+                  ,internalenergy_old(intg),internalenergy_new(intg),dissipatedenergy_old(intg),dissipatedenergy_new(intg),modulus_new(intg))
    do i=1,3
     do j=1,3
      modulus_trl%val(i,j,k,l)=(stress_trl%val(i,j)-stress_new(intg)%val(i,j))/(defgrad_trl%val(k,l)-defgrad_new(intg)%val(k,l))
