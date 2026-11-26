@@ -5,8 +5,8 @@ program fem_main
  implicit none
  integer :: freq
 ! Variables maillage
- integer :: nnode,nnset,nelset,nelem3d,nelem2D,ndof,nnode_per_element3d,nnode_per_element2D,nntg,nntg_per_element3d,nntg_per_element2D
- real(8), allocatable :: coords(:,:),location(:,:)
+ integer :: nnode,nnset,nelset,nelem3d,nelem2d,ndof,nnode_per_element3d,nnode_per_element2D,nntg2d,nntg3d,nntg_per_element3d,nntg_per_element2D
+ real(8), allocatable :: coords(:,:)
  integer, allocatable :: connect3d(:,:),connect2d(:,:),idelem2d(:),idelem3d(:)
 ! Données matériaux
  character(5) :: cname
@@ -15,9 +15,10 @@ program fem_main
  integer, allocatable :: elset_elem(:),elset_start(:),elset_end(:)
 ! Variables pour assemblage
  integer :: i,j,k,l,ij,kl,idof,jdof,kdof,ldof,iddl,jddl,kddl,ielem,inode,jnode,knode,iter,istp,unit,istat,intg,jntg,igss,jgss,iset,nstat,nprop
- integer, allocatable :: bc_mech_type(:),bc_therm_type(:)
- real(8), allocatable :: bc_mech_val(:,:),bc_therm_val(:,:)
- real(8), allocatable :: interpolation(:,:),gradient(:,:,:),volume(:),wght(:)
+ integer, allocatable :: bc_dof_type(:),bc_node_type(:),bc_element2d_type(:)
+ real(8), allocatable :: bc_dof_val(:,:),bc_node_val(:,:),bc_element2d_val(:,:)
+ real(8), allocatable :: interpolation3d(:,:),location3d(:,:),gradient3d(:,:,:),volume(:),wght3d(:)
+ real(8), allocatable :: interpolation2d(:,:),area(:),wght2d(:)
  real(8), allocatable :: stiffness(:),residual_mech(:),increment_mech(:)
  real(8), allocatable :: conductance(:),residual_therm(:),increment_therm(:)
  real(8), allocatable :: position_new(:),position_old(:)
@@ -79,27 +80,29 @@ program fem_main
  write(*,'("Number of nodes",i6)') nnode
  ndof=3*nnode
  write(*,'("Number of DOFs",i6)') ndof
- nntg=nntg_per_element3d*nelem3d
- write(*,'("Number of integration points",i6)') nntg
+ nntg3d=nntg_per_element3d*nelem3d
+ nntg2d=nntg_per_element2d*nelem2d
+ write(*,'("Number of 3D integration points",i6)') nntg3d
+ write(*,'("Number of 2D integration points",i6)') nntg2d
  write(*,'("Number of nodes per 2D element",i6)') nnode_per_element2d
  write(*,'("Number of nodes per 3D element",i6)') nnode_per_element3d
 
- allocate(matrix(3*nnode_per_element3d,3*nnode_per_element3d),vector(3*nnode_per_element3d),auxiliary(9,3*nnode_per_element3d))
+ allocate(matrix(3*max(nnode_per_element3d,nnode_per_element2d),3*max(nnode_per_element3d,nnode_per_element2d)),vector(3*max(nnode_per_element3d,nnode_per_element2d)),auxiliary(9,3*nnode_per_element3d))
 ! *** initializes variables
  allocate(position_new(ndof),position_old(ndof))
  allocate(temperature_new(nnode),temperature_old(nnode))
- allocate(temp_new(nntg),temp_old(nntg))
- allocate(tempgrad_new(nntg),tempgrad_old(nntg))
- allocate(heatflow_new(nntg),heatflow_old(nntg))
- allocate(defgrad_new(nntg),defgrad_old(nntg))
- allocate(stress_new(nntg),stress_old(nntg))
- allocate(modulus_new(nntg))
- allocate(source_new(nntg))
- allocate(capacity_new(nntg))
- allocate(conductivity_new(nntg))
- allocate(state_new(nstat,nntg),state_old(nstat,nntg))
- allocate(dissipatedenergy_new(nntg),dissipatedenergy_old(nntg))
- allocate(internalenergy_new(nntg),internalenergy_old(nntg))
+ allocate(temp_new(nntg3d),temp_old(nntg3d))
+ allocate(tempgrad_new(nntg3d),tempgrad_old(nntg3d))
+ allocate(heatflow_new(nntg3d),heatflow_old(nntg3d))
+ allocate(defgrad_new(nntg3d),defgrad_old(nntg3d))
+ allocate(stress_new(nntg3d),stress_old(nntg3d))
+ allocate(modulus_new(nntg3d))
+ allocate(source_new(nntg3d))
+ allocate(capacity_new(nntg3d))
+ allocate(conductivity_new(nntg3d))
+ allocate(state_new(nstat,nntg3d),state_old(nstat,nntg3d))
+ allocate(dissipatedenergy_new(nntg3d),dissipatedenergy_old(nntg3d))
+ allocate(internalenergy_new(nntg3d),internalenergy_old(nntg3d))
  do ielem=1,nelem3d
   do inode=1,nnode_per_element3d
    idof=3*connect3d(inode,ielem)-2
@@ -137,8 +140,32 @@ program fem_main
    enddo
   enddo
  enddo
-! *** calculates the shape function derivative
- allocate(interpolation(nnode_per_element3d,nntg),gradient(3,nnode_per_element3d,nntg),location(3,nntg),wght(nntg),volume(nelem3d))
+! *** calculates the shape function and shape function derivative for 2D elements
+ allocate(interpolation2d(nnode_per_element2d,nntg2d),wght2d(nntg2d),area(nelem2d))
+ allocate(x(nnode_per_element2d),y(nnode_per_element2d),z(nnode_per_element2d))
+ do ielem=1,nelem2d
+  do inode=1,nnode_per_element2d
+   x(inode)=coords(1,connect2d(inode,ielem))
+   y(inode)=coords(2,connect2d(inode,ielem))
+   z(inode)=coords(3,connect2d(inode,ielem))
+  enddo
+  igss=(ielem-1)*nntg_per_element2d+1
+  jgss=(ielem-1)*nntg_per_element2d+nntg_per_element2d
+  select case(nntg_per_element2d)
+   case(1)
+    call triangleT3(x,y,z,interpolation2d(:,igss:jgss),wght2d(igss:jgss),area(ielem))
+   case(3)
+    call triangleT6(x,y,z,interpolation2d(:,igss:jgss),wght2d(igss:jgss),area(ielem))
+   case(4)
+    call quadrangleQ4(x,y,z,interpolation2d(:,igss:jgss),wght2d(igss:jgss),area(ielem))
+   case default
+    write(*,'("Unknown type of 2D element. Program will stop !")')
+    stop
+  end select
+ enddo
+ deallocate(x,y,z)
+! *** calculates the shape function and shape function derivative for 2D elements
+ allocate(interpolation3d(nnode_per_element3d,nntg3d),gradient3d(3,nnode_per_element3d,nntg3d),location3d(3,nntg3d),wght3d(nntg3d),volume(nelem3d))
  allocate(x(nnode_per_element3d),y(nnode_per_element3d),z(nnode_per_element3d))
  do ielem=1,nelem3d
   do inode=1,nnode_per_element3d
@@ -150,11 +177,11 @@ program fem_main
   jgss=(ielem-1)*nntg_per_element3d+nntg_per_element3d
   select case(nntg_per_element3d)
    case(1)
-    call tetrahedronT4(x,y,z,interpolation(:,igss:jgss),gradient(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
+    call tetrahedronT4(x,y,z,interpolation3d(:,igss:jgss),gradient3d(:,:,igss:jgss),location3d(:,igss:jgss),wght3d(igss:jgss),volume(ielem))
    case(4)
-    call tetrahedronT10(x,y,z,interpolation(:,igss:jgss),gradient(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
+    call tetrahedronT10(x,y,z,interpolation3d(:,igss:jgss),gradient3d(:,:,igss:jgss),location3d(:,igss:jgss),wght3d(igss:jgss),volume(ielem))
    case(8)
-    call hexahedronH8(x,y,z,interpolation(:,igss:jgss),gradient(:,:,igss:jgss),location(:,igss:jgss),wght(igss:jgss),volume(ielem))
+    call hexahedronH8(x,y,z,interpolation3d(:,igss:jgss),gradient3d(:,:,igss:jgss),location3d(:,igss:jgss),wght3d(igss:jgss),volume(ielem))
    case default
     write(*,'("Unknown type of element. Program will stop !")')
     stop
@@ -191,7 +218,7 @@ program fem_main
  iparm_therm(17) = -1            ! pas de réordonnancement METIS
  iparm_therm(34) = 0             ! utiliser zero-based indexing → =1 pour C, =0 pour Fortran
 ! *** finds nodes with prescribed BC
- allocate(bc_mech_type(ndof),bc_mech_val(2,ndof),bc_therm_type(nnode),bc_therm_val(2,nnode))
+ allocate(bc_dof_type(ndof),bc_dof_val(2,ndof),bc_node_type(nnode),bc_node_val(2,nnode),bc_element2d_type(nelem2d),bc_element2d_val(2,nelem2d))
  call read_step(fileproc)
 ! *** saves initial state
  if (freq.ne.0) then
@@ -224,17 +251,17 @@ program fem_main
   !$omp parallel default(shared)
   !$omp do private(idof,i,inode) schedule(static)
   do idof=1,ndof
-   if (bc_mech_type(idof).eq.1) then
+   if (bc_dof_type(idof).eq.1) then
     inode=(idof+2)/3
     i=idof-3*inode+3
-    position_new(idof)=coords(i,inode)+bc_mech_val(1,idof)+(bc_mech_val(2,idof)-bc_mech_val(1,idof))*progress
+    position_new(idof)=coords(i,inode)+bc_dof_val(1,idof)+(bc_dof_val(2,idof)-bc_dof_val(1,idof))*progress
    endif
   enddo
   !$omp enddo
   !$omp do private(inode) schedule(static)
   do inode=1,nnode
-   if (bc_therm_type(inode).eq.1) then
-    temperature_new(inode)=bc_therm_val(1,inode)+(bc_therm_val(2,inode)-bc_therm_val(1,inode))*progress
+   if (bc_node_type(inode).eq.1) then
+    temperature_new(inode)=bc_node_val(1,inode)+(bc_node_val(2,inode)-bc_node_val(1,inode))*progress
    endif
   enddo
   !$omp enddo
@@ -263,7 +290,7 @@ program fem_main
       do i=1,3
        idof=3*(connect3d(inode,ielem)-1)+i
        do j=1,3
-        defgrad_new(igss)%val(i,j)=defgrad_new(igss)%val(i,j)+position_new(idof)*gradient(j,inode,igss)
+        defgrad_new(igss)%val(i,j)=defgrad_new(igss)%val(i,j)+position_new(idof)*gradient3d(j,inode,igss)
        enddo
       enddo
      enddo
@@ -279,9 +306,9 @@ program fem_main
      tempgrad_new(igss)=null1
      do inode=1,nnode_per_element3d
       idof=connect3d(inode,ielem)
-      temp_new(igss)=temp_new(igss)+temperature_new(idof)*interpolation(inode,igss)
+      temp_new(igss)=temp_new(igss)+temperature_new(idof)*interpolation3d(inode,igss)
       do i=1,3
-       tempgrad_new(igss)%val(i)=tempgrad_new(igss)%val(i)+temperature_new(idof)*gradient(i,inode,igss)
+       tempgrad_new(igss)%val(i)=tempgrad_new(igss)%val(i)+temperature_new(idof)*gradient3d(i,inode,igss)
       enddo
      enddo
     enddo
@@ -293,7 +320,7 @@ program fem_main
     case("ELAST","elast","Elast")
      !$omp parallel default(shared)
      !$omp do private(intg) schedule(static)
-     do intg=1,nntg
+     do intg=1,nntg3d
       call thermoelasticity(nprop,nstat,props,time_old,time_new,defgrad_old(intg),defgrad_new(intg),stress_old(intg),stress_new(intg),state_old(:,intg),state_new(:,intg) &
                            ,temp_old(intg),temp_new(intg),tempgrad_old(intg),tempgrad_new(intg),heatflow_old(intg),heatflow_new(intg) &
                            ,internalenergy_old(intg),internalenergy_new(intg),dissipatedenergy_old(intg),dissipatedenergy_new(intg) &
@@ -304,7 +331,7 @@ program fem_main
     case("PLAST","plast","Plast")
      !$omp parallel default(shared)
      !$omp do private(intg) schedule(static)
-     do intg=1,nntg
+     do intg=1,nntg3d
       call thermoplasticity(nprop,nstat,props,time_old,time_new,defgrad_old(intg),defgrad_new(intg),stress_old(intg),stress_new(intg),state_old(:,intg),state_new(:,intg) &
                            ,temp_old(intg),temp_new(intg),tempgrad_old(intg),tempgrad_new(intg),heatflow_old(intg),heatflow_new(intg) &
                            ,internalenergy_old(intg),internalenergy_new(intg),dissipatedenergy_old(intg),dissipatedenergy_new(intg) &
@@ -316,14 +343,6 @@ program fem_main
      write(*,'("ERROR: UNKNOWN MATERIAL TYPE")')
      stop
    end select
-! ! ! !    !$omp parallel default(shared)
-! ! ! !    !$omp do private(intg) schedule(static)
-! ! ! !    do intg=1,nntg
-! ! ! !     call thermal(nprop,nstat,props,time_old,time_new,temp_old(intg),temp_new(intg),tempgrad_old(intg),tempgrad_new(intg),state_old(:,intg),state_new(:,intg) &
-! ! ! !                    ,heatflow_old(intg),heatflow_new(intg),capacity_new(intg),conductivity_new(intg))
-! ! ! !    enddo
-! ! ! !    !$omp enddo
-! ! ! !    !$omp end parallel
    stiffness=0.d0
    residual_mech=0.d0
    conductance=0.d0
@@ -345,10 +364,10 @@ program fem_main
          matrix(iddl,kddl)=0.d0
          do j=1,3
           do l=1,3
-           matrix(iddl,kddl)=matrix(iddl,kddl)+gradient(j,inode,igss)*modulus_new(igss)%val(i,j,k,l)*gradient(l,knode,igss)
+           matrix(iddl,kddl)=matrix(iddl,kddl)+gradient3d(j,inode,igss)*modulus_new(igss)%val(i,j,k,l)*gradient3d(l,knode,igss)
           enddo
          enddo
-         matrix(iddl,kddl)=matrix(iddl,kddl)*wght(igss)
+         matrix(iddl,kddl)=matrix(iddl,kddl)*wght3d(igss)
          jdof=correspond_mech(idof,kdof)
          !$omp atomic update
          stiffness(jdof)=stiffness(jdof)+matrix(iddl,kddl)
@@ -368,13 +387,13 @@ program fem_main
       idof=connect3d(inode,ielem)
       do knode=1,nnode_per_element3d
        kdof=connect3d(knode,ielem)
-       matrix(inode,knode)=interpolation(inode,igss)*capacity_new(igss)*interpolation(knode,igss)/(time_new-time_old)
+       matrix(inode,knode)=interpolation3d(inode,igss)*capacity_new(igss)*interpolation3d(knode,igss)/(time_new-time_old)
        do i=1,3
         do k=1,3
-         matrix(inode,knode)=matrix(inode,knode)+0.5d0*gradient(i,inode,igss)*conductivity_new(igss)%val(i,k)*gradient(k,knode,igss)
+         matrix(inode,knode)=matrix(inode,knode)+0.5d0*gradient3d(i,inode,igss)*conductivity_new(igss)%val(i,k)*gradient3d(k,knode,igss)
         enddo
        enddo
-       matrix(inode,knode)=matrix(inode,knode)*wght(igss)
+       matrix(inode,knode)=matrix(inode,knode)*wght3d(igss)
        jdof=correspond_therm(idof,kdof)
        !$omp atomic update
        conductance(jdof)=conductance(jdof)+matrix(inode,knode)
@@ -394,9 +413,9 @@ program fem_main
        iddl=3*(inode-1)+i
        vector(iddl)=0.d0
        do j=1,3
-        vector(iddl)=vector(iddl)+stress_new(igss)%val(i,j)*gradient(j,inode,igss)
+        vector(iddl)=vector(iddl)+stress_new(igss)%val(i,j)*gradient3d(j,inode,igss)
        enddo
-       vector(iddl)=vector(iddl)*wght(igss)
+       vector(iddl)=vector(iddl)*wght3d(igss)
        !$omp atomic update
        residual_mech(idof)=residual_mech(idof)+vector(iddl)
       enddo
@@ -411,22 +430,45 @@ program fem_main
      igss=(ielem-1)*nntg_per_element3d+intg
      do inode=1,nnode_per_element3d
       idof=connect3d(inode,ielem)
-      vector(inode)=interpolation(inode,igss)*(capacity_new(igss)*(temp_new(igss)-temp_old(igss))/(time_new-time_old)-source_new(igss))
-!       vector(inode)=interpolation(inode,igss)*capacity_new(igss)*(temp_new(igss)-temp_old(igss))/(time_new-time_old)
+      vector(inode)=interpolation3d(inode,igss)*(capacity_new(igss)*(temp_new(igss)-temp_old(igss))/(time_new-time_old)-source_new(igss))
+!       vector(inode)=interpolation3d(inode,igss)*capacity_new(igss)*(temp_new(igss)-temp_old(igss))/(time_new-time_old)
       do i=1,3
-       vector(inode)=vector(inode)-0.5d0*gradient(i,inode,igss)*(heatflow_new(igss)%val(i)+heatflow_old(igss)%val(i))
+       vector(inode)=vector(inode)-0.5d0*gradient3d(i,inode,igss)*(heatflow_new(igss)%val(i)+heatflow_old(igss)%val(i))
       enddo
-      vector(inode)=vector(inode)*wght(igss)
+      vector(inode)=vector(inode)*wght3d(igss)
       !$omp atomic update
       residual_therm(idof)=residual_therm(idof)+vector(inode)
      enddo
     enddo
    enddo
    !$omp end do
+   !$omp do schedule(static) private(ielem,intg,igss,inode,idof,knode,kdof,jdof,vector,matrix)
+   do ielem=1,nelem2d
+    if (bc_element2d_type(ielem).eq.2) then
+     do intg=1,nntg_per_element2d
+      igss=(ielem-1)*nntg_per_element2d+intg
+      do inode=1,nnode_per_element2d
+       idof=connect2d(inode,ielem)
+       vector(inode)=0.d0
+       do knode=1,nnode_per_element2d
+        kdof=connect2d(knode,ielem)
+        vector(inode)=vector(inode)+interpolation2d(inode,igss)*wght2d(igss)*bc_element2d_val(1,ielem)*interpolation2d(knode,igss)*(0.5d0*(temperature_new(kdof)+temperature_old(kdof))-bc_element2d_val(2,ielem))
+        matrix(inode,knode)=0.5d0*interpolation2d(inode,igss)*wght2d(igss)*bc_element2d_val(1,ielem)*interpolation2d(knode,igss)
+        jdof=correspond_therm(idof,kdof)
+        !$omp atomic update
+        conductance(jdof)=conductance(jdof)+matrix(inode,knode)
+       enddo
+      !$omp atomic update
+       residual_therm(idof)=residual_therm(idof)+vector(inode)
+      enddo
+     enddo
+    endif
+   enddo
+   !$omp end do
 ! *** prescribes mechanical boundary conditions
    !$omp do schedule(static) private(idof,jdof,kdof)
    do idof=1,ndof
-    if (bc_mech_type(idof).eq.1) then
+    if (bc_dof_type(idof).eq.1) then
      residual_mech(idof)=0.d0
      do jdof=1,ndof
       kdof=correspond_mech(idof,jdof)
@@ -435,16 +477,16 @@ program fem_main
      kdof=correspond_mech(idof,idof)
      stiffness(kdof)=1.d0
     endif
-    if (bc_mech_type(idof).eq.2) then
+    if (bc_dof_type(idof).eq.2) then
      !$omp atomic update
-     residual_mech(idof)=residual_mech(idof)-bc_mech_val(1,idof)-(bc_mech_val(2,idof)-bc_mech_val(1,idof))*progress
+     residual_mech(idof)=residual_mech(idof)-bc_dof_val(1,idof)-(bc_dof_val(2,idof)-bc_dof_val(1,idof))*progress
     endif
    enddo
    !$omp end do
 ! *** prescribes thermal boundary conditions
    !$omp do schedule(static) private(inode,jnode,knode)
    do inode=1,nnode
-    if (bc_therm_type(inode).eq.1) then
+    if (bc_node_type(inode).eq.1) then
      residual_therm(inode)=0.d0
      do jnode=1,nnode
       knode=correspond_therm(inode,jnode)
@@ -453,9 +495,10 @@ program fem_main
      knode=correspond_therm(inode,inode)
      conductance(knode)=1.d0
     endif
-    if (bc_therm_type(inode).eq.2) then
+    if (bc_node_type(inode).eq.2) then
      !$omp atomic update
-     residual_therm(inode)=residual_therm(inode)-bc_therm_val(1,inode)-(bc_therm_val(2,inode)-bc_therm_val(1,inode))*progress
+!      write(*,*) inode
+     residual_therm(inode)=residual_therm(inode)-bc_node_val(1,inode)-(bc_node_val(2,inode)-bc_node_val(1,inode))*progress
     endif
    enddo
    !$omp end do
@@ -464,7 +507,7 @@ program fem_main
    res_mech_old=res_mech
    res_mech=0.d0
    do idof=1,ndof
-    if (bc_mech_type(idof).ne.1) then
+    if (bc_dof_type(idof).ne.1) then
      res_mech=res_mech+residual_mech(idof)**2.d0
     endif
    enddo
@@ -476,7 +519,7 @@ program fem_main
    res_therm_old=res_therm
    res_therm=0.d0
    do inode=1,nnode
-    if (bc_therm_type(inode).ne.1) then
+    if (bc_node_type(inode).ne.1) then
      res_therm=res_therm+residual_therm(inode)**2.d0
     endif
    enddo
@@ -682,16 +725,16 @@ end subroutine
 subroutine export_rct(iopt)
  implicit none
  integer :: iset,iopt
- real(8) :: reaction(3),moment(3),disp(3)
+ real(8) :: reaction(3),moment(3),disp(3),temp
  select case(iopt)
  case(0)
-  open(unit=20, file="reaction.out", status="replace", action="write")
+  open(unit=20, file="thermomechanical.out", status="replace", action="write")
   write(20,'(" TIME")',advance='no')
   do iset=1,nnset
    if (iset.eq.nnset) then
-    write(20,'(" RF1_",a," RF2_",a," RF3_",a," U1_",a," U2_",a," U3_",a)',advance='yes') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
+    write(20,'(" RF1_",a," RF2_",a," RF3_",a," U1_",a," U2_",a," U3_",a," T_",a)',advance='yes') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
    else
-    write(20,'(" RF1_",a," RF2_",a," RF3_",a," U1_",a," U2_",a," U3_",a)',advance='no') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
+    write(20,'(" RF1_",a," RF2_",a," RF3_",a," U1_",a," U2_",a," U3_",a," T_",a)',advance='no') trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset)),trim(nset_names(iset))
    endif
   enddo
  case(1)
@@ -708,7 +751,7 @@ subroutine export_rct(iopt)
       iddl=3*(inode-1)+i
       vector(iddl)=0.d0
       do j=1,3
-       vector(iddl)=vector(iddl)+stress_old(igss)%val(i,j)*gradient(j,inode,igss)*wght(igss)
+       vector(iddl)=vector(iddl)+stress_old(igss)%val(i,j)*gradient3d(j,inode,igss)*wght3d(igss)
       enddo
       !$omp atomic update
       residual_mech(idof)=residual_mech(idof)+vector(iddl)
@@ -719,8 +762,8 @@ subroutine export_rct(iopt)
   !$omp end do
   !$omp end parallel
   do idof=1,ndof
-   if (bc_mech_type(idof).eq.2) then
-    residual_mech(idof)=residual_mech(idof)-bc_mech_val(1,idof)-(bc_mech_val(2,idof)-bc_mech_val(1,idof))*progress
+   if (bc_dof_type(idof).eq.2) then
+    residual_mech(idof)=residual_mech(idof)-bc_dof_val(1,idof)-(bc_dof_val(2,idof)-bc_dof_val(1,idof))*progress
    endif
   enddo
   do iset=1,nnset
@@ -734,6 +777,7 @@ subroutine export_rct(iopt)
    disp(1)=0.d0
    disp(2)=0.d0
    disp(3)=0.d0
+   temp=0.d0
    do inode=nset_start(iset),nset_end(iset)
     jnode=nset_nodes(inode)
     idof=3*jnode-2
@@ -742,15 +786,16 @@ subroutine export_rct(iopt)
     disp(1)=disp(1)+position_old(idof)-coords(1,jnode)
     disp(2)=disp(2)+position_old(jdof)-coords(2,jnode)
     disp(3)=disp(3)+position_old(kdof)-coords(3,jnode)
-    if (bc_mech_type(idof).eq.1) then
+    temp=temp+temperature_old(jnode)
+    if (bc_dof_type(idof).eq.1) then
 !      write(*,'("Node",i6," DOF:",i6," Reaction residual_mech:",es12.4)') jnode,idof,residual_mech(idof)
      reaction(1)=reaction(1)+residual_mech(idof)
     endif
-    if (bc_mech_type(jdof).eq.1) then
+    if (bc_dof_type(jdof).eq.1) then
 !      write(*,'("Node",i6," DOF:",i6," Reaction residual_mech:",es12.4)') jnode,idof,residual_mech(idof)
      reaction(2)=reaction(2)+residual_mech(jdof)
     endif
-    if (bc_mech_type(jdof).eq.1) then
+    if (bc_dof_type(jdof).eq.1) then
 !      write(*,'("Node",i6," DOF:",i6," Reaction force:",es12.4)') jnode,idof,force(idof)
      reaction(3)=reaction(3)+residual_mech(kdof)
     endif
@@ -761,10 +806,11 @@ subroutine export_rct(iopt)
    disp(1)=disp(1)/real(nset_end(iset)-nset_start(iset)+1,8)
    disp(2)=disp(2)/real(nset_end(iset)-nset_start(iset)+1,8)
    disp(3)=disp(3)/real(nset_end(iset)-nset_start(iset)+1,8)
+   temp=temp/real(nset_end(iset)-nset_start(iset)+1,8)
    if (iset.eq.nnset) then
-    write(20,'(6es12.4)',advance='yes') reaction(:),disp(:)
+    write(20,'(7es12.4)',advance='yes') reaction(:),disp(:),temp
    else
-    write(20,'(6es12.4)',advance='no') reaction(:),disp(:)
+    write(20,'(7es12.4)',advance='no') reaction(:),disp(:),temp
    endif
   enddo
  case(2)
@@ -849,7 +895,7 @@ subroutine export_vtu(filename)
      stress(i,j)=0.d0
      do intg=1,nntg_per_element3d
       igss=(ielem-1)*nntg_per_element3d+intg
-      stress(i,j)=stress(i,j)+wght(igss)*stress_old(igss)%val(i,j)/volume(ielem)
+      stress(i,j)=stress(i,j)+wght3d(igss)*stress_old(igss)%val(i,j)/volume(ielem)
      enddo
     enddo
    enddo
@@ -864,7 +910,7 @@ subroutine export_vtu(filename)
      defgrad(i,j)=0.d0
      do intg=1,nntg_per_element3d
       igss=(ielem-1)*nntg_per_element3d+intg
-      defgrad(i,j)=defgrad(i,j)+wght(igss)*defgrad_old(igss)%val(i,j)/volume(ielem)
+      defgrad(i,j)=defgrad(i,j)+wght3d(igss)*defgrad_old(igss)%val(i,j)/volume(ielem)
      enddo
     enddo
    enddo
@@ -879,7 +925,7 @@ subroutine export_vtu(filename)
      state(istat)=0.d0
      do intg=1,nntg_per_element3d
       igss=(ielem-1)*nntg_per_element3d+intg
-      state(istat)=state(istat)+wght(igss)*state_old(istat,igss)/volume(ielem)
+      state(istat)=state(istat)+wght3d(igss)*state_old(istat,igss)/volume(ielem)
      enddo
     enddo
     do istat=1,nstat-1
@@ -895,7 +941,7 @@ subroutine export_vtu(filename)
    energy=0.d0
    do intg=1,nntg_per_element3d
     igss=(ielem-1)*nntg_per_element3d+intg
-    energy=energy+wght(igss)*internalenergy_old(igss)/volume(ielem)
+    energy=energy+wght3d(igss)*internalenergy_old(igss)/volume(ielem)
    enddo
    write(unit,'(1E16.6E3)') energy
   enddo
@@ -906,7 +952,7 @@ subroutine export_vtu(filename)
    energy=0.d0
    do intg=1,nntg_per_element3d
     igss=(ielem-1)*nntg_per_element3d+intg
-    energy=energy+wght(igss)*dissipatedenergy_old(igss)/volume(ielem)
+    energy=energy+wght3d(igss)*dissipatedenergy_old(igss)/volume(ielem)
    enddo
    write(unit,'(1E16.6E3)') energy
   enddo
@@ -916,7 +962,7 @@ subroutine export_vtu(filename)
    temp=0.d0
    do intg=1,nntg_per_element3d
     igss=(ielem-1)*nntg_per_element3d+intg
-    temp=temp+wght(igss)*temp_old(igss)/volume(ielem)
+    temp=temp+wght3d(igss)*temp_old(igss)/volume(ielem)
    enddo
    write(unit,'(1E16.6E3)') temp
   enddo
@@ -927,7 +973,7 @@ subroutine export_vtu(filename)
     flux(i)=0.d0
     do intg=1,nntg_per_element3d
      igss=(ielem-1)*nntg_per_element3d+intg
-     flux(i)=flux(i)+wght(igss)*heatflow_old(igss)%val(i)/volume(ielem)
+     flux(i)=flux(i)+wght3d(igss)*heatflow_old(igss)%val(i)/volume(ielem)
     enddo
    enddo
    write(unit,'(3E16.6E3)') (flux(i),i=1,3)
@@ -1564,25 +1610,24 @@ subroutine read_step(filename)
  implicit none
  character(len=*), intent(in) :: filename
  character(len=256) :: line
- logical :: reading_step,reading_disp,reading_force,reading_pressure,reading_temp,reading_flux
+ logical :: reading_step,reading_disp,reading_force,reading_pressure,reading_temp,reading_flux,reading_convection
  integer :: i,j,k,nbc,iset,inode,jnode,bc_axis,jelem
  character(len=64) :: bc_name
  real(8) :: bc_value1,bc_value2
  real(8) :: area
- real(8), allocatable :: interpolation2D(:,:),wght2D(:)
-
- allocate(interpolation2D(nnode_per_element2d,nntg_per_element2d),wght2D(nntg_per_element2d))
- allocate(x(nnode_per_element2d),y(nnode_per_element2d),z(nnode_per_element2d))
  reading_step=.false.
  reading_disp=.false.
  reading_force=.false.
  reading_pressure=.false.
  reading_temp=.false.
  reading_flux=.false.
- bc_mech_type(:)=0
- bc_mech_val(:,:)=0.d0
- bc_therm_type(:)=0
- bc_therm_val(:,:)=0.d0
+ reading_convection=.false.
+ bc_dof_type(:)=0
+ bc_dof_val(:,:)=0.d0
+ bc_node_type(:)=0
+ bc_node_val(:,:)=0.d0
+ bc_element2d_type(:)=0
+ bc_element2d_val(:,:)=0.d0
  open(unit=10, file=filename, status='old')
  do
   read(10,'(A)', end=100) line
@@ -1597,6 +1642,7 @@ subroutine read_step(filename)
    reading_pressure=.false.
    reading_temp=.false.
    reading_flux=.false.
+   reading_convection=.false.
    cycle
   endif
   if (index(line, "*FORCE") > 0) then
@@ -1605,6 +1651,7 @@ subroutine read_step(filename)
    reading_pressure=.false.
    reading_temp=.false.
    reading_flux=.false.
+   reading_convection=.false.
    cycle
   endif
   if (index(line, "*PRESSURE") > 0) then
@@ -1613,6 +1660,7 @@ subroutine read_step(filename)
    reading_pressure=.true.
    reading_temp=.false.
    reading_flux=.false.
+   reading_convection=.false.
    cycle
   endif
   if (index(line, "*TEMPERATURE") > 0) then
@@ -1621,6 +1669,7 @@ subroutine read_step(filename)
    reading_pressure=.false.
    reading_temp=.true.
    reading_flux=.false.
+   reading_convection=.false.
    cycle
   endif
   if (index(line, "*FLUX") > 0) then
@@ -1629,6 +1678,16 @@ subroutine read_step(filename)
    reading_pressure=.false.
    reading_temp=.false.
    reading_flux=.true.
+   reading_convection=.false.
+   cycle
+  endif
+  if (index(line, "*CONVECTION") > 0) then
+   reading_disp=.false.
+   reading_force=.false.
+   reading_pressure=.false.
+   reading_temp=.false.
+   reading_flux=.false.
+   reading_convection=.true.
    cycle
   endif
   if (reading_step) then
@@ -1658,9 +1717,9 @@ subroutine read_step(filename)
       jnode=nset_nodes(inode)
 !       write(*,*) jnode
       idof=3*jnode+bc_axis-3
-      bc_mech_type(idof)=1
-      bc_mech_val(1,idof)=bc_value1
-      bc_mech_val(2,idof)=bc_value2
+      bc_dof_type(idof)=1
+      bc_dof_val(1,idof)=bc_value1
+      bc_dof_val(2,idof)=bc_value2
      enddo
     endif
    enddo
@@ -1686,9 +1745,9 @@ subroutine read_step(filename)
       jnode=nset_nodes(inode)
 !       write(*,*) jnode
       idof=3*jnode+bc_axis-3
-      bc_mech_type(idof)=2
-      bc_mech_val(1,idof)=bc_value1
-      bc_mech_val(2,idof)=bc_value2
+      bc_dof_type(idof)=2
+      bc_dof_val(1,idof)=bc_value1
+      bc_dof_val(2,idof)=bc_value2
      enddo
     endif
    enddo
@@ -1712,29 +1771,15 @@ subroutine read_step(filename)
      write(*,*) "found set",iset
      do ielem=elset_start(iset),elset_end(iset)
       jelem=elset_elem(ielem)
-      do inode=1,nnode_per_element2d
-       x(inode)=coords(1,connect2d(inode,jelem))
-       y(inode)=coords(2,connect2d(inode,jelem))
-       z(inode)=coords(3,connect2d(inode,jelem))
-      enddo
-      select case(nntg_per_element2d)
-       case(1)
-        call triangleT3(x,y,z,interpolation2D(:,:),wght2D(:),area)
-       case(3)
-        call triangleT6(x,y,z,interpolation2D(:,:),wght2D(:),area)
-       case(4)
-        call quadrangleQ4(x,y,z,interpolation2D(:,:),wght2D(:),area)
-       case default
-        write(*,'("Unknown type of 2D element. Program will stop !")')
-        stop
-      end select
+      igss=(jelem-1)*nntg_per_element2d+1
+      jgss=(jelem-1)*nntg_per_element2d+nntg_per_element2d
       do inode=1,nnode_per_element2d
        jnode=connect2d(inode,jelem)
        idof=3*jnode+bc_axis-3
-       bc_mech_type(idof)=2
-       do intg=1,nntg_per_element2d
-        bc_mech_val(1,idof)=bc_mech_val(1,idof)-interpolation2D(inode,intg)*wght2D(intg)*bc_value1
-        bc_mech_val(2,idof)=bc_mech_val(2,idof)-interpolation2D(inode,intg)*wght2D(intg)*bc_value2
+       bc_dof_type(idof)=2
+       do intg=igss,jgss
+        bc_dof_val(1,idof)=bc_dof_val(1,idof)-interpolation2d(inode,intg)*wght2d(intg)*bc_value1
+        bc_dof_val(2,idof)=bc_dof_val(2,idof)-interpolation2d(inode,intg)*wght2d(intg)*bc_value2
        enddo
       enddo
      enddo
@@ -1756,9 +1801,9 @@ subroutine read_step(filename)
       write(*,*) "found set",iset
      do inode=nset_start(iset),nset_end(iset)
       jnode=nset_nodes(inode)
-      bc_therm_type(jnode)=1
-      bc_therm_val(1,jnode)=bc_value1
-      bc_therm_val(2,jnode)=bc_value2
+      bc_node_type(jnode)=1
+      bc_node_val(1,jnode)=bc_value1
+      bc_node_val(2,jnode)=bc_value2
      enddo
     endif
    enddo
@@ -1778,18 +1823,39 @@ subroutine read_step(filename)
       write(*,*) "found set",iset
      do inode=nset_start(iset),nset_end(iset)
       jnode=nset_nodes(inode)
-      bc_therm_type(jnode)=2
-      bc_therm_val(1,jnode)=bc_value1
-      bc_therm_val(2,jnode)=bc_value2
+      bc_node_type(jnode)=2
+      bc_node_val(1,jnode)=bc_value1
+      bc_node_val(2,jnode)=bc_value2
      enddo
     endif
    enddo
    reading_flux=.false.
   endif
+  if (reading_convection) then
+   i=index(line,",")
+   j=index(line(i+1:len(line)),",")
+   bc_name=line(1:i-1)
+   write(*,'("  Elset for prescribed convection flux density: ",a)') trim(bc_name)
+   read(line(i+1:i+j),*) bc_value1
+   write(*,'("  Initial value for prescribed convection flux: ",f12.4)') bc_value1
+   read(line(i+j+1:len(line)),*) bc_value2
+   write(*,'("  Final value for prescribed convection flux: ",f12.4)') bc_value2
+   do iset=1,nelset
+    if (bc_name.eq.elset_names(iset)) then
+     write(*,*) "found set",iset
+     do ielem=elset_start(iset),elset_end(iset)
+      jelem=elset_elem(ielem)
+      bc_element2d_type(jelem)=2
+      bc_element2d_val(1,jelem)=bc_value1
+      bc_element2d_val(2,jelem)=bc_value2
+     enddo
+    endif
+   enddo
+   reading_convection=.false.
+  endif
  enddo
 100 continue
  close(unit=10)
- deallocate(interpolation2D,wght2D,x,y,z)
 end subroutine
 ! *******************************************************************
 ! *** subroutine read_inp
@@ -2641,7 +2707,7 @@ subroutine thermoplasticity(nprop,nstat,props,time_old,time_new,defgrad_old,defg
 !  write(*,'(20es12.4)') strain_new%val(:),
 ! *** calculate final dissipated energy density
 !  dissipatedenergy_new=dissipatedenergy_old+0.5d0*((stress_old+stress_new).ddot.(plastic_strain_new-plastic_strain_old))-(0.5d0*(yield_old+yield_new)-threshold)*(cumulated_new-cumulated_old)
- dissipatedenergy_new=dissipatedenergy_old+0.5d0*((stress_old+stress_new).ddot.(plastic_strain_new-plastic_strain_old))-hardening*((cumulated_new*crit)/(cumulated_new+crit))**coefficient**(crit/(cumulated_new+crit))**2.d0*(cumulated_new-cumulated_old)
+ dissipatedenergy_new=dissipatedenergy_old+0.5d0*((stress_old+stress_new).ddot.(plastic_strain_new-plastic_strain_old))-hardening*((cumulated_new*crit)/(cumulated_new+crit))**coefficient*(crit/(cumulated_new+crit))**2.d0*(cumulated_new-cumulated_old)
 ! *** calculate final internal energy density
 !  internalenergy_new=0.5d0*(stress_new.ddot.elastic_strain_new)+hardening/(coefficient+1.d0)*cumulated_new**(coefficient+1.d0)
  internalenergy_new=0.5d0*(stress_new.ddot.elastic_strain_new)+hardening/(coefficient+1.d0)*((cumulated_new*crit)/(cumulated_new+crit))**(coefficient+1.d0)
